@@ -1,0 +1,1943 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Symplify — Binder Design Platform</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  /* =========================================================
+     DESIGN TOKENS
+  ========================================================= */
+  :root {
+    --navy:       #0B1628;
+    --navy-mid:   #132040;
+    --navy-light: #1E3058;
+    --teal:       #00C2B2;
+    --teal-dim:   #007A70;
+    --teal-glow:  rgba(0,194,178,0.15);
+    --amber:      #F5A623;
+    --amber-dim:  rgba(245,166,35,0.15);
+    --white:      #F7F9FC;
+    --grey-1:     #C8D4E8;
+    --grey-2:     #7E95B8;
+    --grey-3:     #3A506E;
+    --red:        #FF5C7A;
+    --green:      #3DD68C;
+
+    --font-display: 'Space Grotesk', sans-serif;
+    --font-body:    'Inter', sans-serif;
+    --font-mono:    'JetBrains Mono', monospace;
+
+    --radius:    8px;
+    --radius-lg: 16px;
+    --shadow:    0 4px 24px rgba(0,0,0,0.3);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--navy);
+    color: var(--white);
+    font-family: var(--font-body);
+    font-size: 14px;
+    line-height: 1.6;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* =========================================================
+     MOLECULAR BACKGROUND CANVAS
+  ========================================================= */
+  #mol-canvas {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.35;
+    z-index: 0;
+  }
+
+  /* =========================================================
+     LAYOUT
+  ========================================================= */
+  #root { position: relative; z-index: 1; }
+
+  .app {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* =========================================================
+     NAV
+  ========================================================= */
+  nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 40px;
+    height: 64px;
+    border-bottom: 1px solid var(--grey-3);
+    background: rgba(11,22,40,0.85);
+    backdrop-filter: blur(12px);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  .nav-logo {
+    font-family: var(--font-display);
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    color: var(--white);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+  }
+
+  .nav-logo-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--teal);
+    box-shadow: 0 0 12px var(--teal);
+  }
+
+  .nav-links {
+    display: flex;
+    gap: 8px;
+  }
+
+  .nav-btn {
+    background: none;
+    border: none;
+    color: var(--grey-1);
+    font-family: var(--font-body);
+    font-size: 13px;
+    padding: 6px 14px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .nav-btn:hover { background: var(--navy-light); color: var(--white); }
+  .nav-btn.active { background: var(--teal-glow); color: var(--teal); }
+
+  /* =========================================================
+     HERO / UPLOAD PAGE
+  ========================================================= */
+  .hero {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 80px 40px;
+    text-align: center;
+  }
+
+  .hero-eyebrow {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--teal);
+    margin-bottom: 20px;
+  }
+
+  .hero-title {
+    font-family: var(--font-display);
+    font-size: clamp(40px, 6vw, 72px);
+    font-weight: 700;
+    letter-spacing: -2px;
+    line-height: 1.0;
+    margin-bottom: 20px;
+    background: linear-gradient(135deg, var(--white) 0%, var(--grey-1) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .hero-sub {
+    font-size: 16px;
+    color: var(--grey-2);
+    max-width: 520px;
+    margin-bottom: 52px;
+    line-height: 1.7;
+  }
+
+  /* =========================================================
+     UPLOAD FORM
+  ========================================================= */
+  .upload-card {
+    background: var(--navy-mid);
+    border: 1px solid var(--grey-3);
+    border-radius: var(--radius-lg);
+    padding: 40px;
+    width: 100%;
+    max-width: 600px;
+    box-shadow: var(--shadow);
+    text-align: left;
+  }
+
+  .upload-zone {
+    border: 2px dashed var(--grey-3);
+    border-radius: var(--radius);
+    padding: 48px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-bottom: 28px;
+    position: relative;
+  }
+
+  .upload-zone:hover, .upload-zone.drag-over {
+    border-color: var(--teal);
+    background: var(--teal-glow);
+  }
+
+  .upload-zone input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+    width: 100%;
+    height: 100%;
+  }
+
+  .upload-icon {
+    width: 40px;
+    height: 40px;
+    margin: 0 auto 12px;
+    color: var(--grey-2);
+  }
+
+  .upload-zone.has-file { border-color: var(--teal); background: var(--teal-glow); }
+  .upload-zone.has-file .upload-label { color: var(--teal); }
+
+  .upload-label {
+    font-family: var(--font-display);
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--grey-1);
+    display: block;
+    margin-bottom: 4px;
+  }
+
+  .upload-hint {
+    font-size: 12px;
+    color: var(--grey-2);
+  }
+
+  /* Form fields */
+  .field-group {
+    margin-bottom: 20px;
+  }
+
+  .field-label {
+    font-family: var(--font-display);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--grey-2);
+    margin-bottom: 8px;
+    display: block;
+  }
+
+  .field-row {
+    display: flex;
+    gap: 10px;
+  }
+
+  .type-btn {
+    flex: 1;
+    padding: 12px;
+    border: 1px solid var(--grey-3);
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--grey-1);
+    font-family: var(--font-body);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-align: center;
+  }
+
+  .type-btn:hover { border-color: var(--teal); color: var(--white); }
+  .type-btn.selected { border-color: var(--teal); background: var(--teal-glow); color: var(--teal); }
+
+  .input {
+    width: 100%;
+    background: var(--navy);
+    border: 1px solid var(--grey-3);
+    border-radius: var(--radius);
+    color: var(--white);
+    font-family: var(--font-body);
+    font-size: 13px;
+    padding: 10px 14px;
+    transition: border-color 0.15s;
+    outline: none;
+  }
+
+  .input:focus { border-color: var(--teal); }
+  .input::placeholder { color: var(--grey-3); }
+
+  .input-row { display: flex; gap: 10px; }
+  .input-row .input { flex: 1; }
+
+  .hint {
+    font-size: 11px;
+    color: var(--grey-2);
+    margin-top: 6px;
+  }
+
+  /* Advanced toggle */
+  .advanced-toggle {
+    background: none;
+    border: none;
+    color: var(--teal);
+    font-family: var(--font-body);
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-bottom: 16px;
+    padding: 0;
+  }
+
+  .advanced-panel {
+    background: rgba(0,0,0,0.2);
+    border: 1px solid var(--grey-3);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+
+  .advanced-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+
+  /* Submit button */
+  .btn-primary {
+    width: 100%;
+    padding: 14px;
+    background: var(--teal);
+    border: none;
+    border-radius: var(--radius);
+    color: var(--navy);
+    font-family: var(--font-display);
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.15s;
+    letter-spacing: 0.3px;
+  }
+
+  .btn-primary:hover { background: #00d9c8; transform: translateY(-1px); }
+  .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+  .btn-secondary {
+    padding: 10px 20px;
+    background: transparent;
+    border: 1px solid var(--grey-3);
+    border-radius: var(--radius);
+    color: var(--grey-1);
+    font-family: var(--font-body);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .btn-secondary:hover { border-color: var(--white); color: var(--white); }
+
+  /* =========================================================
+     DIFFICULTY PAGE
+  ========================================================= */
+  .difficulty-page {
+    flex: 1;
+    padding: 60px 40px;
+    max-width: 800px;
+    margin: 0 auto;
+    width: 100%;
+  }
+
+  .page-title {
+    font-family: var(--font-display);
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -1px;
+    margin-bottom: 8px;
+  }
+
+  .page-sub {
+    color: var(--grey-2);
+    margin-bottom: 40px;
+  }
+
+  .difficulty-gauge {
+    background: var(--navy-mid);
+    border: 1px solid var(--grey-3);
+    border-radius: var(--radius-lg);
+    padding: 36px;
+    margin-bottom: 24px;
+    display: flex;
+    align-items: center;
+    gap: 40px;
+  }
+
+  .gauge-circle {
+    flex-shrink: 0;
+    width: 120px;
+    height: 120px;
+    position: relative;
+  }
+
+  .gauge-circle svg {
+    width: 100%;
+    height: 100%;
+    transform: rotate(-90deg);
+  }
+
+  .gauge-value {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .gauge-number {
+    font-family: var(--font-display);
+    font-size: 28px;
+    font-weight: 700;
+    line-height: 1;
+  }
+
+  .gauge-grade {
+    font-size: 11px;
+    color: var(--grey-2);
+    margin-top: 2px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  .gauge-details { flex: 1; }
+  .gauge-details h3 {
+    font-family: var(--font-display);
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+
+  .rec-designs {
+    font-size: 13px;
+    color: var(--grey-1);
+  }
+
+  .rec-designs strong { color: var(--teal); }
+
+  .factor-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+
+  .factor-card {
+    background: var(--navy-mid);
+    border: 1px solid var(--grey-3);
+    border-radius: var(--radius);
+    padding: 16px;
+  }
+
+  .factor-name {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--grey-2);
+    margin-bottom: 8px;
+    font-family: var(--font-mono);
+  }
+
+  .factor-bar-bg {
+    height: 4px;
+    background: var(--grey-3);
+    border-radius: 2px;
+    margin-bottom: 6px;
+    overflow: hidden;
+  }
+
+  .factor-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.6s ease;
+  }
+
+  .factor-value {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--grey-1);
+  }
+
+  .warnings-box {
+    background: var(--amber-dim);
+    border: 1px solid var(--amber);
+    border-radius: var(--radius);
+    padding: 16px 20px;
+    margin-bottom: 24px;
+  }
+
+  .warnings-box h4 {
+    font-family: var(--font-display);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--amber);
+    margin-bottom: 8px;
+  }
+
+  .warnings-box ul {
+    list-style: none;
+    padding: 0;
+  }
+
+  .warnings-box li {
+    font-size: 12px;
+    color: var(--grey-1);
+    padding: 3px 0;
+  }
+
+  .warnings-box li::before { content: "⚠ "; color: var(--amber); }
+
+  .action-row {
+    display: flex;
+    gap: 12px;
+    justify-content: flex-end;
+  }
+
+  /* =========================================================
+     JOB STATUS PAGE
+  ========================================================= */
+  .status-page {
+    flex: 1;
+    padding: 60px 40px;
+    max-width: 800px;
+    margin: 0 auto;
+    width: 100%;
+  }
+
+  .pipeline-viz {
+    background: var(--navy-mid);
+    border: 1px solid var(--grey-3);
+    border-radius: var(--radius-lg);
+    padding: 36px;
+    margin-bottom: 28px;
+  }
+
+  .pipeline-stages {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    overflow-x: auto;
+    padding: 8px 0;
+  }
+
+  .stage-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    min-width: 120px;
+    flex: 1;
+  }
+
+  .stage-connector {
+    flex: 1;
+    height: 2px;
+    background: var(--grey-3);
+    min-width: 30px;
+    position: relative;
+    top: -22px;
+  }
+
+  .stage-connector.done { background: var(--teal); }
+
+  .stage-dot {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: 2px solid var(--grey-3);
+    background: var(--navy);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    transition: all 0.3s;
+    flex-shrink: 0;
+  }
+
+  .stage-dot.pending  { border-color: var(--grey-3); color: var(--grey-3); }
+  .stage-dot.running  { border-color: var(--teal); color: var(--teal);
+                        box-shadow: 0 0 16px var(--teal); animation: pulse 2s infinite; }
+  .stage-dot.completed { border-color: var(--teal); background: var(--teal); color: var(--navy); }
+  .stage-dot.failed   { border-color: var(--red); color: var(--red); }
+
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 8px var(--teal); }
+    50%       { box-shadow: 0 0 24px var(--teal); }
+  }
+
+  .stage-label {
+    font-size: 11px;
+    text-align: center;
+    color: var(--grey-2);
+    font-family: var(--font-mono);
+    max-width: 100px;
+    line-height: 1.3;
+  }
+
+  .stage-label.active { color: var(--teal); }
+
+  .status-meta {
+    background: var(--navy-mid);
+    border: 1px solid var(--grey-3);
+    border-radius: var(--radius-lg);
+    padding: 28px;
+    margin-bottom: 24px;
+  }
+
+  .meta-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+  }
+
+  .meta-item label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--grey-2);
+    font-family: var(--font-mono);
+    display: block;
+    margin-bottom: 4px;
+  }
+
+  .meta-item .meta-value {
+    font-family: var(--font-display);
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--white);
+  }
+
+  .status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+  }
+
+  .status-badge.running   { background: var(--teal-glow); color: var(--teal); }
+  .status-badge.completed { background: rgba(61,214,140,0.15); color: var(--green); }
+  .status-badge.failed    { background: rgba(255,92,122,0.15); color: var(--red); }
+  .status-badge.pending   { background: rgba(126,149,184,0.15); color: var(--grey-2); }
+
+  .log-box {
+    background: var(--navy);
+    border: 1px solid var(--grey-3);
+    border-radius: var(--radius);
+    padding: 16px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--grey-1);
+    max-height: 200px;
+    overflow-y: auto;
+    line-height: 1.8;
+  }
+
+  /* =========================================================
+     RESULTS PAGE
+  ========================================================= */
+  .results-page {
+    flex: 1;
+    padding: 40px;
+    max-width: 1200px;
+    margin: 0 auto;
+    width: 100%;
+  }
+
+  .results-layout {
+    display: grid;
+    grid-template-columns: 420px 1fr;
+    gap: 24px;
+    align-items: start;
+  }
+
+  .results-list { }
+
+  .results-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+  }
+
+  .results-header h2 {
+    font-family: var(--font-display);
+    font-size: 20px;
+    font-weight: 700;
+  }
+
+  .result-card {
+    background: var(--navy-mid);
+    border: 1px solid var(--grey-3);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 10px;
+    cursor: pointer;
+    transition: all 0.15s;
+    display: grid;
+    grid-template-columns: 28px 1fr auto;
+    gap: 12px;
+    align-items: center;
+  }
+
+  .result-card:hover { border-color: var(--grey-2); }
+  .result-card.selected { border-color: var(--teal); background: var(--teal-glow); }
+
+  .result-rank {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--grey-2);
+    text-align: center;
+  }
+
+  .result-card.selected .result-rank { color: var(--teal); }
+
+  .result-name {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--grey-1);
+    margin-bottom: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .result-metrics {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .metric-pill {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: rgba(200,212,232,0.08);
+    color: var(--grey-1);
+    white-space: nowrap;
+  }
+
+  .metric-pill.good { background: rgba(61,214,140,0.12); color: var(--green); }
+  .metric-pill.warn { background: var(--amber-dim); color: var(--amber); }
+
+  .result-score {
+    font-family: var(--font-display);
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--teal);
+    text-align: right;
+  }
+
+  .result-score-label {
+    font-size: 10px;
+    color: var(--grey-2);
+    text-align: right;
+    font-family: var(--font-mono);
+  }
+
+  /* Detail panel */
+  .detail-panel {
+    background: var(--navy-mid);
+    border: 1px solid var(--grey-3);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    position: sticky;
+    top: 80px;
+  }
+
+  .structure-viewer {
+    background: var(--navy);
+    height: 320px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+  }
+
+  .viewer-placeholder {
+    text-align: center;
+    color: var(--grey-3);
+  }
+
+  .viewer-placeholder svg { margin-bottom: 12px; opacity: 0.5; }
+
+  .viewer-controls {
+    position: absolute;
+    bottom: 12px;
+    right: 12px;
+    display: flex;
+    gap: 8px;
+  }
+
+  .viewer-btn {
+    background: rgba(11,22,40,0.8);
+    border: 1px solid var(--grey-3);
+    border-radius: 6px;
+    color: var(--grey-1);
+    font-size: 11px;
+    font-family: var(--font-mono);
+    padding: 5px 10px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .viewer-btn:hover { border-color: var(--teal); color: var(--teal); }
+  .viewer-btn.active { border-color: var(--teal); color: var(--teal); background: var(--teal-glow); }
+
+  .detail-metrics {
+    padding: 24px;
+  }
+
+  .detail-metrics h3 {
+    font-family: var(--font-display);
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 16px;
+  }
+
+  .metrics-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .metrics-table td {
+    padding: 7px 0;
+    border-bottom: 1px solid rgba(58,80,110,0.4);
+    font-size: 12px;
+  }
+
+  .metrics-table td:first-child {
+    color: var(--grey-2);
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+
+  .metrics-table td:last-child {
+    text-align: right;
+    font-family: var(--font-mono);
+    font-weight: 500;
+  }
+
+  .metrics-table tr:last-child td { border-bottom: none; }
+
+  .download-row {
+    padding: 20px 24px;
+    border-top: 1px solid var(--grey-3);
+    display: flex;
+    gap: 10px;
+  }
+
+  .download-row .btn-primary {
+    flex: 1;
+    padding: 10px;
+    font-size: 13px;
+  }
+
+  /* =========================================================
+     JOBS LIST
+  ========================================================= */
+  .jobs-page {
+    flex: 1;
+    padding: 60px 40px;
+    max-width: 900px;
+    margin: 0 auto;
+    width: 100%;
+  }
+
+  .jobs-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .jobs-table th {
+    text-align: left;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--grey-2);
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--grey-3);
+  }
+
+  .jobs-table td {
+    padding: 14px 16px;
+    border-bottom: 1px solid rgba(58,80,110,0.3);
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .jobs-table tr:hover td { background: var(--navy-mid); }
+
+  .empty-state {
+    text-align: center;
+    padding: 80px 40px;
+    color: var(--grey-2);
+  }
+
+  .empty-state h3 {
+    font-family: var(--font-display);
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--grey-1);
+    margin-bottom: 8px;
+  }
+
+  /* =========================================================
+     LOADING / SPINNER
+  ========================================================= */
+  .spinner {
+    width: 20px;
+    height: 20px;
+    border: 2px solid var(--grey-3);
+    border-top-color: var(--teal);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    display: inline-block;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .loading-overlay {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 60px;
+    color: var(--grey-2);
+    font-size: 13px;
+  }
+
+  /* Divider */
+  .divider {
+    height: 1px;
+    background: var(--grey-3);
+    margin: 24px 0;
+  }
+
+  /* Section heading */
+  .section-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--grey-2);
+    margin-bottom: 12px;
+  }
+
+  /* Hotspot tags */
+  .tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .tag {
+    background: var(--teal-glow);
+    border: 1px solid var(--teal-dim);
+    color: var(--teal);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .tag-remove {
+    cursor: pointer;
+    opacity: 0.6;
+    font-size: 14px;
+    line-height: 1;
+  }
+
+  .tag-remove:hover { opacity: 1; }
+
+  /* Confidence badge */
+  .confidence-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  .confidence-badge.high   { background: rgba(61,214,140,0.12); color: var(--green); }
+  .confidence-badge.medium { background: var(--amber-dim); color: var(--amber); }
+  .confidence-badge.low    { background: rgba(255,92,122,0.12); color: var(--red); }
+
+  /* Toast */
+  .toast {
+    position: fixed;
+    bottom: 32px;
+    right: 32px;
+    background: var(--navy-mid);
+    border: 1px solid var(--grey-3);
+    border-radius: var(--radius);
+    padding: 14px 20px;
+    font-size: 13px;
+    z-index: 1000;
+    animation: slideUp 0.2s ease;
+    max-width: 320px;
+  }
+
+  @keyframes slideUp {
+    from { transform: translateY(16px); opacity: 0; }
+    to   { transform: translateY(0);    opacity: 1; }
+  }
+</style>
+</head>
+<body>
+<canvas id="mol-canvas"></canvas>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ============================================================
+// Molecular background animation
+// ============================================================
+function initMolCanvas() {
+  const canvas = document.getElementById('mol-canvas');
+  const ctx    = canvas.getContext('2d');
+  let nodes = [], W, H, raf;
+
+  function resize() {
+    W = canvas.width  = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+
+  function init() {
+    resize();
+    nodes = Array.from({length: 55}, () => ({
+      x:  Math.random() * W,
+      y:  Math.random() * H,
+      vx: (Math.random() - 0.5) * 0.3,
+      vy: (Math.random() - 0.5) * 0.3,
+      r:  Math.random() * 3 + 1.5,
+    }));
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    // Edges
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const dx = nodes[i].x - nodes[j].x;
+        const dy = nodes[i].y - nodes[j].y;
+        const d  = Math.sqrt(dx*dx + dy*dy);
+        if (d < 140) {
+          ctx.beginPath();
+          ctx.moveTo(nodes[i].x, nodes[i].y);
+          ctx.lineTo(nodes[j].x, nodes[j].y);
+          ctx.strokeStyle = `rgba(0,194,178,${0.15 * (1 - d/140)})`;
+          ctx.lineWidth   = 0.8;
+          ctx.stroke();
+        }
+      }
+    }
+    // Nodes
+    nodes.forEach(n => {
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,194,178,0.5)';
+      ctx.fill();
+      n.x += n.vx; n.y += n.vy;
+      if (n.x < 0 || n.x > W) n.vx *= -1;
+      if (n.y < 0 || n.y > H) n.vy *= -1;
+    });
+    raf = requestAnimationFrame(draw);
+  }
+
+  init();
+  draw();
+  window.addEventListener('resize', () => { resize(); });
+  return () => cancelAnimationFrame(raf);
+}
+
+// ============================================================
+// API helpers
+// ============================================================
+const API = {
+  async scoreTarget(file, targetType) {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('target_type', targetType);
+    const r = await fetch('/api/score-difficulty', { method: 'POST', body: fd });
+    return r.json();
+  },
+  async findHotspots(file, targetType, chain) {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('target_type', targetType);
+    fd.append('chain', chain || 'A');
+    const r = await fetch('/api/find-hotspots', { method: 'POST', body: fd });
+    return r.json();
+  },
+  async createJob(file, name, targetType, config) {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('name', name);
+    fd.append('target_type', targetType);
+    fd.append('config', JSON.stringify(config));
+    const r = await fetch('/api/jobs', { method: 'POST', body: fd });
+    return r.json();
+  },
+  async getJob(id)     { return (await fetch(`/api/jobs/${id}`)).json(); },
+  async listJobs()     { return (await fetch('/api/jobs')).json(); },
+  async getResults(id) { return (await fetch(`/api/jobs/${id}/results`)).json(); },
+  structureUrl(jobId, rank, linker=false) {
+    return `/api/jobs/${jobId}/results/${rank}/structure?linker=${linker}`;
+  },
+};
+
+// ============================================================
+// Utility components
+// ============================================================
+function Spinner() { return <span className="spinner" />; }
+
+function StatusBadge({ status }) {
+  const labels = { running: '● Running', completed: '✓ Complete',
+                   failed: '✗ Failed', pending: '○ Pending',
+                   cancelled: '✗ Cancelled' };
+  return <span className={`status-badge ${status}`}>{labels[status] || status}</span>;
+}
+
+function Toast({ msg, onClose }) {
+  useEffect(() => {
+    const t = setTimeout(onClose, 3500);
+    return () => clearTimeout(t);
+  }, []);
+  return <div className="toast">{msg}</div>;
+}
+
+// ============================================================
+// STEP 1: Upload + Configure
+// ============================================================
+function UploadPage({ onNext }) {
+  const [file,       setFile]       = useState(null);
+  const [dragOver,   setDragOver]   = useState(false);
+  const [targetType, setTargetType] = useState('protein');
+  const [jobName,    setJobName]    = useState('');
+  const [chain,      setChain]      = useState('A');
+  const [hotspots,   setHotspots]   = useState([]);
+  const [hotInput,   setHotInput]   = useState('');
+  const [linkerRep,  setLinkerRep]  = useState(3);
+  const [nDesigns,   setNDesigns]   = useState('');
+  const [showAdv,    setShowAdv]    = useState(false);
+  const [loading,    setLoading]    = useState(false);
+
+  function handleFile(f) {
+    if (!f) return;
+    setFile(f);
+    if (!jobName) setJobName(f.name.replace(/\.(pdb|cif|cif\.gz)$/i, ''));
+  }
+
+  function addHotspot(e) {
+    if (e.key === 'Enter' && hotInput.trim()) {
+      setHotspots(h => [...h, hotInput.trim()]);
+      setHotInput('');
+    }
+  }
+
+  async function handleSubmit() {
+    if (!file) return;
+    setLoading(true);
+    try {
+      // Score difficulty first
+      const diff = await API.scoreTarget(file, targetType);
+      onNext({ file, jobName, targetType, chain, hotspots,
+               linkerRep, nDesigns: nDesigns || diff.recommended_designs,
+               difficulty: diff });
+    } catch(e) {
+      setLoading(false);
+    }
+  }
+
+  const gradeColor = (g) =>
+    g === 'Easy' ? 'var(--green)' : g === 'Medium' ? 'var(--amber)' :
+    g === 'Hard' ? '#FF8C42' : 'var(--red)';
+
+  return (
+    <div className="hero">
+      <div className="hero-eyebrow">Princeton iGEM 2026</div>
+      <h1 className="hero-title">Symplify</h1>
+      <p className="hero-sub">
+        Upload a target structure and get computationally designed protein binders,
+        ranked and ready for experimental validation.
+      </p>
+
+      <div className="upload-card">
+        {/* File drop zone */}
+        <div
+          className={`upload-zone ${dragOver ? 'drag-over' : ''} ${file ? 'has-file' : ''}`}
+          onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={e => { e.preventDefault(); setDragOver(false); handleFile(e.dataTransfer.files[0]); }}
+        >
+          <input type="file" accept=".pdb,.cif,.cif.gz"
+                 onChange={e => handleFile(e.target.files[0])} />
+          <svg className="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <path d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+          </svg>
+          <span className="upload-label">
+            {file ? `✓ ${file.name}` : 'Drop PDB or CIF file here'}
+          </span>
+          <span className="upload-hint">
+            {file ? `${(file.size/1024).toFixed(1)} KB` : 'or click to browse'}
+          </span>
+        </div>
+
+        {/* Target type */}
+        <div className="field-group">
+          <span className="field-label">Target type</span>
+          <div className="field-row">
+            {['protein','small_molecule'].map(t => (
+              <button key={t}
+                className={`type-btn ${targetType === t ? 'selected' : ''}`}
+                onClick={() => setTargetType(t)}>
+                {t === 'protein' ? '🧬 Protein' : '⚗️ Small molecule'}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Job name */}
+        <div className="field-group">
+          <span className="field-label">Job name</span>
+          <input className="input" placeholder="e.g. SHBG binder campaign"
+                 value={jobName} onChange={e => setJobName(e.target.value)} />
+        </div>
+
+        {/* Hotspots */}
+        <div className="field-group">
+          <span className="field-label">
+            {targetType === 'protein' ? 'Hotspot residues' : 'Target atoms'}
+            <span style={{fontWeight:400, textTransform:'none', marginLeft:6,
+                          color:'var(--grey-2)', fontSize:10}}>
+              (optional — auto-detected if blank)
+            </span>
+          </span>
+          <input className="input"
+                 placeholder={targetType === 'protein' ? 'e.g. A47, A52 — press Enter to add' : 'e.g. C10, N1'}
+                 value={hotInput}
+                 onChange={e => setHotInput(e.target.value)}
+                 onKeyDown={addHotspot} />
+          {hotspots.length > 0 && (
+            <div className="tag-list">
+              {hotspots.map(h => (
+                <span key={h} className="tag">
+                  {h}
+                  <span className="tag-remove"
+                        onClick={() => setHotspots(hs => hs.filter(x => x !== h))}>×</span>
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="hint">Press Enter after each {targetType === 'protein' ? 'residue' : 'atom'} ID</div>
+        </div>
+
+        {/* GS linker */}
+        <div className="field-group">
+          <span className="field-label">GS linker length</span>
+          <div className="input-row">
+            <input className="input" type="number" min="1" max="10"
+                   value={linkerRep}
+                   onChange={e => setLinkerRep(+e.target.value)} />
+            <div style={{display:'flex', alignItems:'center', color:'var(--grey-2)',
+                         fontSize:12, whiteSpace:'nowrap', paddingRight:4}}>
+              × GGGGS = {linkerRep * 5} residues
+            </div>
+          </div>
+        </div>
+
+        {/* Advanced */}
+        <button className="advanced-toggle" onClick={() => setShowAdv(!showAdv)}>
+          <span>{showAdv ? '▾' : '▸'}</span> Advanced options
+        </button>
+
+        {showAdv && (
+          <div className="advanced-panel">
+            <div className="advanced-grid">
+              {targetType === 'protein' && (
+                <div className="field-group" style={{marginBottom:0}}>
+                  <span className="field-label">Binder chain</span>
+                  <input className="input" value={chain}
+                         onChange={e => setChain(e.target.value)} />
+                </div>
+              )}
+              <div className="field-group" style={{marginBottom:0}}>
+                <span className="field-label">Override n_designs</span>
+                <input className="input" type="number" placeholder="Auto"
+                       value={nDesigns} onChange={e => setNDesigns(e.target.value)} />
+                <div className="hint">Leave blank to use difficulty-based recommendation</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <button className="btn-primary" onClick={handleSubmit}
+                disabled={!file || !jobName || loading}>
+          {loading ? <><Spinner /> &nbsp;Analysing target…</> : 'Continue →'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// STEP 2: Difficulty score + hotspot review
+// ============================================================
+function DifficultyPage({ data, onBack, onSubmit }) {
+  const { difficulty, targetType, file } = data;
+  const [hotspots, setHotspots]     = useState(data.hotspots);
+  const [autoHots, setAutoHots]     = useState(null);
+  const [loadingH, setLoadingH]     = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (hotspots.length === 0) {
+      setLoadingH(true);
+      API.findHotspots(file, targetType, data.chain).then(r => {
+        setAutoHots(r);
+        if (r.hotspots?.length) setHotspots(r.hotspots);
+        setLoadingH(false);
+      }).catch(() => setLoadingH(false));
+    }
+  }, []);
+
+  const score    = difficulty.overall || 0;
+  const grade    = difficulty.grade   || 'Unknown';
+  const gradeCol = grade === 'Easy' ? 'var(--green)' : grade === 'Medium' ? 'var(--amber)' :
+                   grade === 'Hard' ? '#FF8C42' : 'var(--red)';
+
+  const circumference = 2 * Math.PI * 48;
+  const offset        = circumference * (1 - score / 100);
+
+  async function handleSubmit() {
+    setSubmitting(true);
+    const job = await API.createJob(
+      file, data.jobName, targetType,
+      { hotspots, linker_repeats: data.linkerRep,
+        n_designs: data.nDesigns, chain: data.chain }
+    );
+    onSubmit(job.job_id);
+  }
+
+  return (
+    <div className="difficulty-page">
+      <div className="hero-eyebrow" style={{marginBottom:12}}>Target analysis</div>
+      <h1 className="page-title">Bindability assessment</h1>
+      <p className="page-sub">
+        Review the difficulty score and hotspot predictions before launching your design run.
+      </p>
+
+      {/* Gauge */}
+      <div className="difficulty-gauge">
+        <div className="gauge-circle">
+          <svg viewBox="0 0 120 120">
+            <circle cx="60" cy="60" r="48" fill="none"
+                    stroke="var(--grey-3)" strokeWidth="8" />
+            <circle cx="60" cy="60" r="48" fill="none"
+                    stroke={gradeCol} strokeWidth="8"
+                    strokeDasharray={circumference}
+                    strokeDashoffset={offset}
+                    strokeLinecap="round"
+                    style={{transition:'stroke-dashoffset 1s ease'}} />
+          </svg>
+          <div className="gauge-value">
+            <span className="gauge-number" style={{color: gradeCol}}>{score.toFixed(0)}</span>
+            <span className="gauge-grade">{grade}</span>
+          </div>
+        </div>
+        <div className="gauge-details">
+          <h3>
+            {grade === 'Easy' ? 'Favorable target' :
+             grade === 'Medium' ? 'Moderate challenge' :
+             grade === 'Hard' ? 'Difficult target' : 'Very challenging target'}
+          </h3>
+          <p className="rec-designs">
+            Recommended designs: <strong>{(data.nDesigns || difficulty.recommended_designs || 5000).toLocaleString()}</strong>
+            {data.targetType === 'small_molecule' && (
+              <span style={{color:'var(--grey-2)', fontSize:11, marginLeft:8}}>
+                (×8 LigandMPNN sequences each)
+              </span>
+            )}
+          </p>
+        </div>
+      </div>
+
+      {/* Factors */}
+      {difficulty.factors && Object.keys(difficulty.factors).length > 0 && (
+        <>
+          <div className="section-label">Factors</div>
+          <div className="factor-grid">
+            {Object.entries(difficulty.factors).map(([k, v]) => (
+              <div key={k} className="factor-card">
+                <div className="factor-name">{k.replace(/_/g, ' ')}</div>
+                <div className="factor-bar-bg">
+                  <div className="factor-bar-fill"
+                       style={{ width: `${v.score}%`,
+                                background: v.score > 60 ? 'var(--red)' :
+                                            v.score > 35 ? 'var(--amber)' : 'var(--teal)' }} />
+                </div>
+                <div className="factor-value">
+                  {v.value !== null ? `${v.value} ${v.unit || ''}` : v.note}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* Warnings */}
+      {difficulty.warnings?.length > 0 && (
+        <div className="warnings-box">
+          <h4>Considerations</h4>
+          <ul>{difficulty.warnings.map((w,i) => <li key={i}>{w}</li>)}</ul>
+        </div>
+      )}
+
+      {/* Hotspots */}
+      <div className="section-label" style={{marginTop:24}}>
+        {targetType === 'protein' ? 'Hotspot residues' : 'Target binding features'}
+        {autoHots && (
+          <span className={`confidence-badge ${autoHots.confidence}`}
+                style={{marginLeft:10}}>
+            {autoHots.method} · {autoHots.confidence} confidence
+          </span>
+        )}
+      </div>
+
+      {loadingH ? (
+        <div style={{color:'var(--grey-2)', fontSize:13, padding:'12px 0', display:'flex', gap:10, alignItems:'center'}}>
+          <Spinner /> Auto-detecting {targetType === 'protein' ? 'hotspots' : 'binding features'}…
+        </div>
+      ) : (
+        <div className="tag-list" style={{marginBottom:8}}>
+          {hotspots.length > 0
+            ? hotspots.map(h => (
+                <span key={h} className="tag">
+                  {h}
+                  <span className="tag-remove"
+                        onClick={() => setHotspots(hs => hs.filter(x => x !== h))}>×</span>
+                </span>
+              ))
+            : <span style={{color:'var(--grey-2)', fontSize:12}}>
+                No {targetType === 'protein' ? 'hotspots' : 'features'} specified — model will explore freely
+              </span>
+          }
+        </div>
+      )}
+
+      {autoHots?.details?.note && (
+        <div className="hint" style={{marginBottom:20}}>{autoHots.details.note}</div>
+      )}
+
+      <div className="action-row">
+        <button className="btn-secondary" onClick={onBack}>← Back</button>
+        <button className="btn-primary" style={{width:'auto', padding:'12px 32px'}}
+                onClick={handleSubmit} disabled={submitting}>
+          {submitting ? <><Spinner /> &nbsp;Submitting…</> : 'Launch design run →'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// STEP 3: Job status / pipeline progress
+// ============================================================
+const STAGE_LABELS = {
+  rfd3_generation:  'RFD3\nGeneration',
+  ligandmpnn:       'LigandMPNN\nSequence design',
+  rf3_scoring:      'RF3\nScoring',
+  post_processing:  'Analysis &\nRanking',
+  bindcraft_design: 'BindCraft\nDesign',
+};
+
+function StatusPage({ jobId, onResults }) {
+  const [job,    setJob]    = useState(null);
+  const [stages, setStages] = useState([]);
+
+  useEffect(() => {
+    let alive = true;
+    async function poll() {
+      if (!alive) return;
+      try {
+        const j = await API.getJob(jobId);
+        if (!alive) return;
+        setJob(j);
+        setStages(j.stages || []);
+        if (!['completed','failed','cancelled'].includes(j.status)) {
+          setTimeout(poll, 8000);
+        } else if (j.status === 'completed') {
+          onResults();
+        }
+      } catch { setTimeout(poll, 15000); }
+    }
+    poll();
+    return () => { alive = false; };
+  }, [jobId]);
+
+  if (!job) return (
+    <div className="status-page">
+      <div className="loading-overlay"><Spinner /> Loading job status…</div>
+    </div>
+  );
+
+  const elapsed = job.updated_at && job.created_at
+    ? Math.round((job.updated_at - job.created_at) / 60) : 0;
+
+  return (
+    <div className="status-page">
+      <div className="hero-eyebrow" style={{marginBottom:12}}>Design run</div>
+      <h1 className="page-title">{job.name}</h1>
+      <p className="page-sub" style={{marginBottom:32}}>
+        Job submitted to cluster — polling for updates every 8 seconds.
+      </p>
+
+      {/* Pipeline visualization */}
+      <div className="pipeline-viz">
+        <div className="section-label" style={{marginBottom:20}}>Pipeline stages</div>
+        <div className="pipeline-stages">
+          {stages.map((s, i) => (
+            <React.Fragment key={s.stage_name}>
+              <div className="stage-item">
+                <div className={`stage-dot ${s.status}`}>
+                  {s.status === 'completed' ? '✓' :
+                   s.status === 'running'   ? '●' :
+                   s.status === 'failed'    ? '✗' : (i + 1)}
+                </div>
+                <div className={`stage-label ${s.status === 'running' ? 'active' : ''}`}>
+                  {(STAGE_LABELS[s.stage_name] || s.stage_name).split('\n').map((l,j) =>
+                    <span key={j} style={{display:'block'}}>{l}</span>
+                  )}
+                </div>
+              </div>
+              {i < stages.length - 1 && (
+                <div className={`stage-connector ${s.status === 'completed' ? 'done' : ''}`} />
+              )}
+            </React.Fragment>
+          ))}
+        </div>
+      </div>
+
+      {/* Meta */}
+      <div className="status-meta">
+        <div className="meta-grid">
+          <div className="meta-item">
+            <label>Status</label>
+            <div className="meta-value"><StatusBadge status={job.status} /></div>
+          </div>
+          <div className="meta-item">
+            <label>Target type</label>
+            <div className="meta-value">{job.target_type === 'protein' ? '🧬 Protein' : '⚗️ Small molecule'}</div>
+          </div>
+          <div className="meta-item">
+            <label>Elapsed</label>
+            <div className="meta-value">{elapsed} min</div>
+          </div>
+          {job.difficulty_grade && (
+            <div className="meta-item">
+              <label>Difficulty</label>
+              <div className="meta-value">{job.difficulty_grade} ({job.difficulty?.toFixed(0)})</div>
+            </div>
+          )}
+          {job.config?.n_designs && (
+            <div className="meta-item">
+              <label>Designs</label>
+              <div className="meta-value">{(+job.config.n_designs).toLocaleString()}</div>
+            </div>
+          )}
+          <div className="meta-item">
+            <label>Job ID</label>
+            <div className="meta-value" style={{fontFamily:'var(--font-mono)', fontSize:12}}>
+              {jobId.slice(0,8)}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {job.status === 'failed' && job.error && (
+        <div style={{background:'rgba(255,92,122,0.1)', border:'1px solid var(--red)',
+                     borderRadius:'var(--radius)', padding:16, marginBottom:16}}>
+          <div style={{color:'var(--red)', fontSize:12, fontFamily:'var(--font-mono)'}}>
+            {job.error}
+          </div>
+        </div>
+      )}
+
+      {job.status === 'completed' && (
+        <div style={{textAlign:'center', padding:'24px 0'}}>
+          <button className="btn-primary" style={{width:'auto', padding:'12px 40px'}}
+                  onClick={onResults}>
+            View results →
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// STEP 4: Results
+// ============================================================
+function MetricValue({ name, value, thresholds }) {
+  if (value === null || value === undefined) return <span style={{color:'var(--grey-3)'}}>—</span>;
+  const v = parseFloat(value);
+  if (isNaN(v)) return <span>{value}</span>;
+
+  let cls = '';
+  if (thresholds) {
+    const { good, bad, dir } = thresholds;
+    cls = dir === 'low'
+      ? (v <= good ? 'good' : v >= bad ? 'warn' : '')
+      : (v >= good ? 'good' : v <= bad ? 'warn' : '');
+  }
+  return <span className={`metric-pill ${cls}`}>{v.toFixed(3)}</span>;
+}
+
+const METRIC_DEFS = {
+  iptm:                 { label: 'ipTM',             thresholds: { good: 0.8,  bad: 0.6,  dir: 'high' } },
+  ptm:                  { label: 'pTM',              thresholds: { good: 0.8,  bad: 0.6,  dir: 'high' } },
+  plddt:                { label: 'pLDDT',            thresholds: { good: 0.8,  bad: 0.6,  dir: 'high' } },
+  min_ipae:             { label: 'min ipAE',         thresholds: { good: 1.0,  bad: 1.5,  dir: 'low'  } },
+  rmsd:                 { label: 'RMSD (Å)',         thresholds: { good: 1.5,  bad: 2.5,  dir: 'low'  } },
+  dG:                   { label: 'ΔG (REU)',         thresholds: { good: -30,  bad: -10,  dir: 'low'  } },
+  surface_hydrophobicity: { label: 'Surface hydrophobicity', thresholds: { good: 0.15, bad: 0.25, dir: 'low' } },
+  shape_complementarity: { label: 'Shape complementarity', thresholds: { good: 0.65, bad: 0.5, dir: 'high' } },
+  delta_unsat_hbonds:   { label: 'Δ unsat H-bonds', thresholds: { good: 0,    bad: 2,    dir: 'low'  } },
+  c_terminus_score:     { label: 'C-term accessibility', thresholds: { good: 0.6, bad: 0.3, dir: 'high' } },
+  c_terminus_sasa:      { label: 'C-term SASA (Å²)', thresholds: { good: 40,  bad: 20,   dir: 'high' } },
+};
+
+function ResultsPage({ jobId, onNewJob }) {
+  const [results,  setResults]  = useState([]);
+  const [selected, setSelected] = useState(0);
+  const [loading,  setLoading]  = useState(true);
+  const [linker,   setLinker]   = useState(false);
+
+  useEffect(() => {
+    API.getResults(jobId).then(r => { setResults(r); setLoading(false); });
+  }, [jobId]);
+
+  if (loading) return (
+    <div className="results-page">
+      <div className="loading-overlay"><Spinner /> Loading results…</div>
+    </div>
+  );
+
+  if (results.length === 0) return (
+    <div className="results-page">
+      <div className="empty-state">
+        <h3>No results yet</h3>
+        <p>The pipeline may still be running or no designs passed filters.</p>
+      </div>
+    </div>
+  );
+
+  const sel = results[selected];
+  const m   = sel?.metrics || {};
+
+  return (
+    <div className="results-page">
+      <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:28}}>
+        <div>
+          <div className="hero-eyebrow" style={{marginBottom:4}}>Results</div>
+          <h1 className="page-title" style={{fontSize:28}}>{results.length} ranked designs</h1>
+        </div>
+        <button className="btn-secondary" onClick={onNewJob}>+ New job</button>
+      </div>
+
+      <div className="results-layout">
+        {/* List */}
+        <div className="results-list">
+          {results.slice(0, 30).map((r, i) => {
+            const ms = r.metrics || {};
+            const iptm = parseFloat(ms.iptm || ms.avg_iptm || 0);
+            return (
+              <div key={r.id} className={`result-card ${selected === i ? 'selected' : ''}`}
+                   onClick={() => setSelected(i)}>
+                <div className="result-rank">#{r.rank}</div>
+                <div>
+                  <div className="result-name">{r.design_name}</div>
+                  <div className="result-metrics">
+                    {['iptm','ptm','min_ipae','dG','c_terminus_score'].map(k => {
+                      const v = ms[k] ?? ms[`avg_${k}`];
+                      if (v == null) return null;
+                      const def = METRIC_DEFS[k];
+                      if (!def) return null;
+                      const val = parseFloat(v);
+                      const th  = def.thresholds;
+                      const cls = th
+                        ? (th.dir === 'low'
+                            ? val <= th.good ? 'good' : val >= th.bad ? 'warn' : ''
+                            : val >= th.good ? 'good' : val <= th.bad ? 'warn' : '')
+                        : '';
+                      return (
+                        <span key={k} className={`metric-pill ${cls}`}>
+                          {def.label}: {val.toFixed(3)}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div>
+                  <div className="result-score">{iptm.toFixed(3)}</div>
+                  <div className="result-score-label">ipTM</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Detail */}
+        <div className="detail-panel">
+          <div className="structure-viewer">
+            <div className="viewer-placeholder">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" strokeWidth="1">
+                <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/>
+                <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                <line x1="12" y1="22.08" x2="12" y2="12"/>
+              </svg>
+              <div style={{fontSize:12, color:'var(--grey-2)'}}>
+                Structure viewer<br/>
+                <span style={{fontSize:10}}>Install Mol* for 3D visualization</span>
+              </div>
+            </div>
+            <div className="viewer-controls">
+              <button className={`viewer-btn ${!linker ? 'active' : ''}`}
+                      onClick={() => setLinker(false)}>Binder</button>
+              <button className={`viewer-btn ${linker ? 'active' : ''}`}
+                      onClick={() => setLinker(true)}>+ Linker</button>
+            </div>
+          </div>
+
+          <div className="detail-metrics">
+            <h3>{sel?.design_name}</h3>
+            <table className="metrics-table">
+              <tbody>
+                {Object.entries(METRIC_DEFS).map(([k, def]) => {
+                  const v = m[k] ?? m[`avg_${k}`];
+                  if (v == null) return null;
+                  const val = parseFloat(v);
+                  if (isNaN(val)) return null;
+                  const th  = def.thresholds;
+                  const cls = th
+                    ? (th.dir === 'low'
+                        ? val <= th.good ? 'good' : val >= th.bad ? 'warn' : ''
+                        : val >= th.good ? 'good' : val <= th.bad ? 'warn' : '')
+                    : '';
+                  return (
+                    <tr key={k}>
+                      <td>{def.label}</td>
+                      <td><span className={`metric-pill ${cls}`}>{val.toFixed(3)}</span></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="download-row">
+            <a href={API.structureUrl(jobId, sel?.rank, false)}
+               download={`${sel?.design_name}.pdb`}>
+              <button className="btn-primary" style={{fontSize:12, padding:'8px 14px'}}>
+                ↓ PDB
+              </button>
+            </a>
+            <a href={API.structureUrl(jobId, sel?.rank, true)}
+               download={`${sel?.design_name}_linker.pdb`}>
+              <button className="btn-primary" style={{fontSize:12, padding:'8px 14px'}}>
+                ↓ PDB + linker
+              </button>
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// Jobs list
+// ============================================================
+function JobsPage({ onSelect }) {
+  const [jobs,    setJobs]    = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    API.listJobs().then(j => { setJobs(j); setLoading(false); });
+  }, []);
+
+  if (loading) return (
+    <div className="jobs-page">
+      <div className="loading-overlay"><Spinner /> Loading…</div>
+    </div>
+  );
+
+  return (
+    <div className="jobs-page">
+      <h1 className="page-title" style={{marginBottom:8}}>All jobs</h1>
+      <p className="page-sub" style={{marginBottom:32}}>Click a job to view its status and results.</p>
+
+      {jobs.length === 0 ? (
+        <div className="empty-state">
+          <h3>No jobs yet</h3>
+          <p>Submit your first design run to get started.</p>
+        </div>
+      ) : (
+        <table className="jobs-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Status</th>
+              <th>Difficulty</th>
+              <th>Created</th>
+            </tr>
+          </thead>
+          <tbody>
+            {jobs.map(j => (
+              <tr key={j.id} onClick={() => onSelect(j)}>
+                <td style={{fontFamily:'var(--font-display)', fontWeight:500}}>{j.name}</td>
+                <td style={{color:'var(--grey-2)'}}>
+                  {j.target_type === 'protein' ? '🧬 Protein' : '⚗️ Small molecule'}
+                </td>
+                <td><StatusBadge status={j.status} /></td>
+                <td>
+                  {j.difficulty_grade
+                    ? <span>{j.difficulty_grade} ({parseFloat(j.difficulty||0).toFixed(0)})</span>
+                    : <span style={{color:'var(--grey-3)'}}>—</span>}
+                </td>
+                <td style={{color:'var(--grey-2)', fontFamily:'var(--font-mono)', fontSize:11}}>
+                  {new Date(j.created_at * 1000).toLocaleDateString()}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// Root App
+// ============================================================
+function App() {
+  const [page,    setPage]    = useState('upload');  // upload | difficulty | status | results | jobs
+  const [formData, setFormData] = useState(null);
+  const [jobId,   setJobId]   = useState(null);
+  const [toast,   setToast]   = useState(null);
+
+  useEffect(() => initMolCanvas(), []);
+
+  function showToast(msg) {
+    setToast(msg);
+    setTimeout(() => setToast(null), 3500);
+  }
+
+  function handleJobSelect(job) {
+    setJobId(job.id);
+    setPage(['completed'].includes(job.status) ? 'results' : 'status');
+  }
+
+  return (
+    <div className="app">
+      <nav>
+        <div className="nav-logo" onClick={() => setPage('upload')}>
+          <div className="nav-logo-dot" />
+          Symplify
+        </div>
+        <div className="nav-links">
+          <button className={`nav-btn ${page === 'upload' ? 'active' : ''}`}
+                  onClick={() => setPage('upload')}>New run</button>
+          <button className={`nav-btn ${page === 'jobs' ? 'active' : ''}`}
+                  onClick={() => setPage('jobs')}>All jobs</button>
+          {jobId && (
+            <>
+              <button className={`nav-btn ${page === 'status' ? 'active' : ''}`}
+                      onClick={() => setPage('status')}>Status</button>
+              <button className={`nav-btn ${page === 'results' ? 'active' : ''}`}
+                      onClick={() => setPage('results')}>Results</button>
+            </>
+          )}
+        </div>
+      </nav>
+
+      {page === 'upload' && (
+        <UploadPage onNext={data => { setFormData(data); setPage('difficulty'); }} />
+      )}
+
+      {page === 'difficulty' && formData && (
+        <DifficultyPage
+          data={formData}
+          onBack={() => setPage('upload')}
+          onSubmit={id => {
+            setJobId(id);
+            setPage('status');
+            showToast('Job submitted to cluster ✓');
+          }}
+        />
+      )}
+
+      {page === 'status' && jobId && (
+        <StatusPage jobId={jobId} onResults={() => setPage('results')} />
+      )}
+
+      {page === 'results' && jobId && (
+        <ResultsPage jobId={jobId} onNewJob={() => setPage('upload')} />
+      )}
+
+      {page === 'jobs' && (
+        <JobsPage onSelect={handleJobSelect} />
+      )}
+
+      {toast && <Toast msg={toast} onClose={() => setToast(null)} />}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

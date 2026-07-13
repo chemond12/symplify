@@ -1,0 +1,263 @@
+"""
+hotspot_finder.py
+-----------------
+Automatic hotspot / binding feature identification.
+
+Proteins:      PESTO (if available) or fallback to conservation + B-factor
+Small molecules: RDKit pharmacophore features, ranked by hydrophobicity
+"""
+
+import json
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+
+@dataclass
+class HotspotResult:
+    hotspots:    list        # list of residue IDs (proteins) or atom indices (small mol)
+    method:      str         # "pesto", "fallback", "rdkit_pharmacophore"
+    confidence:  str         # "high", "medium", "low"
+    details:     dict        # method-specific details for display
+
+
+# ---------------------------------------------------------------------------
+# Protein hotspots
+# ---------------------------------------------------------------------------
+
+def find_protein_hotspots(pdb_path: str, chain: str = "A",
+                            pesto_dir: Optional[str] = None) -> HotspotResult:
+    """
+    Identify protein binding hotspots.
+    Uses PESTO if available, otherwise falls back to B-factor + surface exposure.
+    """
+    if pesto_dir and Path(pesto_dir).exists():
+        result = _run_pesto(pdb_path, chain, pesto_dir)
+        if result:
+            return result
+
+    return _protein_hotspot_fallback(pdb_path, chain)
+
+
+def _run_pesto(pdb_path: str, chain: str, pesto_dir: str) -> Optional[HotspotResult]:
+    """Run PESTO and parse output."""
+    try:
+        result = subprocess.run(
+            ["python", f"{pesto_dir}/predict.py",
+             "--pdb", pdb_path, "--chain", chain],
+            capture_output=True, text=True, timeout=300
+        )
+        if result.returncode != 0:
+            return None
+
+        # Parse PESTO output (residue scores)
+        hotspots = []
+        scores = {}
+        for line in result.stdout.split("\n"):
+            parts = line.strip().split()
+            if len(parts) >= 2:
+                try:
+                    res_id = parts[0]
+                    score  = float(parts[1])
+                    scores[res_id] = score
+                    if score > 0.5:
+                        hotspots.append(res_id)
+                except ValueError:
+                    continue
+
+        if not hotspots:
+            return None
+
+        return HotspotResult(
+            hotspots   = hotspots[:20],   # top 20
+            method     = "pesto",
+            confidence = "high",
+            details    = {"scores": scores, "threshold": 0.5}
+        )
+    except Exception as e:
+        return None
+
+
+def _protein_hotspot_fallback(pdb_path: str, chain: str) -> HotspotResult:
+    """
+    Fallback hotspot identification without PESTO.
+    Uses surface exposure (SASA) + B-factor to identify likely interface residues.
+    Low B-factor + high SASA = structurally well-defined surface residue = good hotspot candidate.
+    """
+    try:
+        import freesasa
+        import numpy as np
+        from Bio.PDB import PDBParser
+
+        parser    = PDBParser(QUIET=True)
+        structure = parser.get_structure("target", pdb_path)
+        model     = structure[0]
+
+        # Compute SASA
+        fs_struct = freesasa.Structure(pdb_path)
+        fs_result = freesasa.calc(fs_struct)
+
+        sasa_map = {}
+        for i in range(fs_struct.nAtoms()):
+            c = fs_struct.chainLabel(i)
+            r = fs_struct.residueNumber(i).strip()
+            sasa_map[(c, r)] = sasa_map.get((c, r), 0) + fs_result.atomArea(i)
+
+        # Score each residue
+        candidates = []
+        for ch in model:
+            if ch.id != chain:
+                continue
+            for res in ch:
+                if res.id[0] != " ":
+                    continue
+                res_id = f"{ch.id}{res.id[1]}"
+                sasa   = sasa_map.get((ch.id, str(res.id[1])), 0)
+
+                bfactors = [a.bfactor for a in res]
+                mean_bf  = sum(bfactors) / len(bfactors) if bfactors else 50
+
+                # Score: high SASA, low B-factor
+                score = (sasa / 200.0) * (1.0 / (1.0 + mean_bf / 30.0))
+                if sasa > 20:   # surface-exposed only
+                    candidates.append((res_id, score, res.resname))
+
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        hotspots = [c[0] for c in candidates[:15]]
+
+        return HotspotResult(
+            hotspots   = hotspots,
+            method     = "fallback",
+            confidence = "medium",
+            details    = {
+                "note": "PESTO not available — hotspots estimated from surface exposure and B-factors",
+                "candidates": [(h, round(s, 3), n) for h, s, n in candidates[:15]]
+            }
+        )
+    except Exception as e:
+        return HotspotResult(
+            hotspots   = [],
+            method     = "fallback",
+            confidence = "low",
+            details    = {"error": str(e), "note": "Could not identify hotspots automatically"}
+        )
+
+
+# ---------------------------------------------------------------------------
+# Small molecule binding features
+# ---------------------------------------------------------------------------
+
+def find_small_molecule_features(structure_path: str,
+                                   ligand_resname: Optional[str] = None) -> HotspotResult:
+    """
+    Identify pharmacophoric features of a small molecule for RFD3 targeting.
+    Returns atom indices ranked by binding utility (hydrophobic > aromatic > polar).
+    """
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+        from rdkit.Chem.Pharm3D import Pharmacophore
+        from rdkit.Chem import MolFromPDBFile
+
+        # Load molecule
+        path = str(structure_path)
+        if path.endswith(".pdb"):
+            mol = Chem.MolFromPDBFile(path, sanitize=True, removeHs=False)
+        else:
+            mol = None
+
+        if mol is None:
+            return _fallback_sm_result()
+
+        # Compute pharmacophore features
+        factory = _get_feature_factory()
+        if factory is None:
+            return _fallback_sm_result()
+
+        feats = factory.GetFeaturesForMol(mol)
+
+        # Categorize and rank features
+        ranked = []
+        for feat in feats:
+            family  = feat.GetFamily()
+            atom_ids = list(feat.GetAtomIds())
+            pos     = feat.GetPos()
+
+            # Ranking weight by family (per Rohith's advice: hydrophobic first)
+            weight_map = {
+                "Hydrophobe":       1.0,
+                "LumpedHydrophobe": 1.0,
+                "Aromatic":         0.9,
+                "NegIonizable":     0.5,
+                "PosIonizable":     0.5,
+                "Donor":            0.3,
+                "Acceptor":         0.3,
+            }
+            weight = weight_map.get(family, 0.2)
+
+            ranked.append({
+                "family":   family,
+                "atom_ids": atom_ids,
+                "position": [round(float(pos.x), 2),
+                             round(float(pos.y), 2),
+                             round(float(pos.z), 2)],
+                "weight":   weight,
+            })
+
+        ranked.sort(key=lambda x: x["weight"], reverse=True)
+
+        # Extract top atom indices for RFD3 select_buried
+        top_atoms = []
+        seen = set()
+        for feat in ranked[:8]:
+            for aid in feat["atom_ids"]:
+                if aid not in seen:
+                    top_atoms.append(aid)
+                    seen.add(aid)
+
+        # Map atom indices to PDB atom names for RFD3 input
+        atom_names = []
+        conf = mol.GetConformer()
+        for aid in top_atoms:
+            atom = mol.GetAtomWithIdx(aid)
+            atom_names.append(atom.GetSymbol() + str(aid))
+
+        confidence = "high" if len(ranked) >= 3 else "medium"
+
+        return HotspotResult(
+            hotspots   = atom_names,
+            method     = "rdkit_pharmacophore",
+            confidence = confidence,
+            details    = {
+                "features":    ranked,
+                "top_atoms":   top_atoms,
+                "note": "Features ranked: hydrophobic/aromatic first (best for encapsulation)"
+            }
+        )
+
+    except Exception as e:
+        return _fallback_sm_result(str(e))
+
+
+def _get_feature_factory():
+    try:
+        from rdkit.Chem import MolChemicalFeatures
+        from rdkit import RDConfig
+        import os
+        fdef_path = os.path.join(RDConfig.RDDataDir, "BaseFeatures.fdef")
+        return MolChemicalFeatures.BuildFeatureFactory(fdef_path)
+    except Exception:
+        return None
+
+
+def _fallback_sm_result(error: str = "") -> HotspotResult:
+    return HotspotResult(
+        hotspots   = [],
+        method     = "rdkit_pharmacophore",
+        confidence = "low",
+        details    = {
+            "error": error,
+            "note": "Could not identify features automatically — please specify atoms manually"
+        }
+    )
