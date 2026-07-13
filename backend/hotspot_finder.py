@@ -41,41 +41,65 @@ def find_protein_hotspots(pdb_path: str, chain: str = "A",
 
 
 def _run_pesto(pdb_path: str, chain: str, pesto_dir: str) -> Optional[HotspotResult]:
-    """Run PESTO and parse output."""
+    """
+    Run PESTO via pesto_predict.py and parse JSON output.
+    PESTO stores scores in b-factor field (0=no interface, 1=interface).
+    """
+    import tempfile
+
+    # pesto_predict.py lives in the Symplify backend directory
+    predict_script = Path(__file__).resolve().parent / "pesto_predict.py"
+    if not predict_script.exists():
+        # Also check repo root
+        predict_script = Path(__file__).resolve().parent.parent / "pesto_predict.py"
+    if not predict_script.exists():
+        return None
+
     try:
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+            out_path = tmp.name
+
         result = subprocess.run(
-            ["python", f"{pesto_dir}/predict.py",
-             "--pdb", pdb_path, "--chain", chain],
-            capture_output=True, text=True, timeout=300
+            ["python", str(predict_script),
+             "--pdb",       pdb_path,
+             "--chain",     chain,
+             "--out",       out_path,
+             "--pesto_dir", pesto_dir,
+             "--threshold", "0.5",
+             "--device",    "cpu"],
+            capture_output=True, text=True, timeout=600
         )
+
         if result.returncode != 0:
+            print(f"[PESTO] Error: {result.stderr[:500]}")
             return None
 
-        # Parse PESTO output (residue scores)
-        hotspots = []
-        scores = {}
-        for line in result.stdout.split("\n"):
-            parts = line.strip().split()
-            if len(parts) >= 2:
-                try:
-                    res_id = parts[0]
-                    score  = float(parts[1])
-                    scores[res_id] = score
-                    if score > 0.5:
-                        hotspots.append(res_id)
-                except ValueError:
-                    continue
+        with open(out_path) as f:
+            data = json.load(f)
 
+        Path(out_path).unlink(missing_ok=True)
+
+        hotspots = data.get("hotspots", [])
         if not hotspots:
             return None
 
+        # Build scores dict for display
+        scores = {r["res_id_str"]: r["score"]
+                  for r in data.get("residues", [])}
+
         return HotspotResult(
-            hotspots   = hotspots[:20],   # top 20
+            hotspots   = hotspots,
             method     = "pesto",
             confidence = "high",
-            details    = {"scores": scores, "threshold": 0.5}
+            details    = {
+                "scores":    scores,
+                "threshold": data.get("threshold", 0.5),
+                "model":     data.get("model", "i_v4_1"),
+                "n_residues_scored": len(data.get("residues", [])),
+            }
         )
     except Exception as e:
+        print(f"[PESTO] Exception: {e}")
         return None
 
 

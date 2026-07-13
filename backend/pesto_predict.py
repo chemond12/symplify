@@ -1,0 +1,221 @@
+"""
+pesto_predict.py
+----------------
+Standalone PESTO inference script for use by Symplify's hotspot_finder.
+
+Runs PESTO on a single PDB file and returns residue-level interface
+scores as a JSON file. Scores are read from the b-factor field of
+the PESTO output PDB, where 0 = no interface and 1 = interface.
+
+Usage
+-----
+    python pesto_predict.py \
+        --pdb     /path/to/target.pdb \
+        --chain   A \
+        --out     /path/to/scores.json \
+        --pesto_dir /scratch/network/ch8337/PeSTo
+
+Output JSON format
+------------------
+    {
+        "residues": [
+            {"chain": "A", "res_id": 47, "resname": "GLU", "score": 0.923},
+            ...
+        ],
+        "hotspots": ["A47", "A52", "A61"],   # residues with score > threshold
+        "threshold": 0.5,
+        "method": "pesto",
+        "model": "i_v4_1"
+    }
+"""
+
+import argparse
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+
+def run_pesto(pdb_path: str, chain: str, out_path: str,
+              pesto_dir: str, threshold: float = 0.5,
+              device: str = "cpu") -> dict:
+    """
+    Run PESTO inference on a PDB file and return hotspot scores.
+
+    Parameters
+    ----------
+    pdb_path    : input PDB file
+    chain       : chain ID to score
+    out_path    : path to write JSON output
+    pesto_dir   : path to PeSTo repository root
+    threshold   : score threshold for hotspot calling (default 0.5)
+    device      : 'cpu' or 'cuda'
+
+    Returns
+    -------
+    dict with residue scores and hotspot list
+    """
+    pesto_dir = str(Path(pesto_dir).resolve())
+    save_path = os.path.join(pesto_dir, "model", "save", "i_v4_1_2021-09-07_11-21")
+
+    # Add PESTO paths
+    for p in [pesto_dir, save_path]:
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    import torch as pt
+    from src.dataset import StructuresDataset, collate_batch_features
+    from src.data_encoding import encode_structure, encode_features, extract_topology
+    from src.structure import concatenate_chains, encode_bfactor, split_by_chain
+    from src.structure_io import save_pdb, read_pdb
+    from config import config_model
+    from model import Model
+
+    # Load model
+    model_filepath = os.path.join(save_path, "model_ckpt.pt")
+    device_obj = pt.device(device)
+
+    model = Model(config_model)
+    model.load_state_dict(pt.load(model_filepath,
+                                   map_location=pt.device(device)))
+    model = model.eval().to(device_obj)
+
+    # Run inference
+    dataset = StructuresDataset([pdb_path], with_preprocessing=True)
+
+    results = []
+    output_pdb = None
+
+    with pt.no_grad():
+        for subunits, filepath in dataset:
+            structure = concatenate_chains(subunits)
+
+            X, M = encode_structure(structure)
+            q = encode_features(structure)[0]
+            ids_topk, _, _, _, _ = extract_topology(X, 64)
+            X, ids_topk, q, M = collate_batch_features([[X, ids_topk, q, M]])
+
+            z = model(X.to(device_obj), ids_topk.to(device_obj),
+                      q.to(device_obj), M.float().to(device_obj))
+
+            # prediction index 0 = protein-protein interface
+            p = pt.sigmoid(z[:, 0])
+            structure = encode_bfactor(structure, p.cpu().numpy())
+
+            # Save annotated PDB to temp location
+            tmp_pdb = filepath[:-4] + "_i0.pdb"
+            save_pdb(split_by_chain(structure), tmp_pdb)
+            output_pdb = tmp_pdb
+
+    if output_pdb is None or not Path(output_pdb).exists():
+        raise RuntimeError("PESTO produced no output PDB")
+
+    # Parse b-factors from output PDB
+    residue_scores = _parse_bfactor_scores(output_pdb, chain)
+
+    # Call hotspots
+    hotspots = [
+        r["res_id_str"]
+        for r in residue_scores
+        if r["score"] >= threshold
+    ]
+
+    # Sort hotspots by score descending, take top 20
+    residue_scores.sort(key=lambda x: x["score"], reverse=True)
+    hotspots_sorted = [r["res_id_str"] for r in residue_scores
+                       if r["score"] >= threshold][:20]
+
+    result = {
+        "residues":  residue_scores,
+        "hotspots":  hotspots_sorted,
+        "threshold": threshold,
+        "method":    "pesto",
+        "model":     "i_v4_1",
+    }
+
+    with open(out_path, "w") as f:
+        json.dump(result, f, indent=2)
+
+    # Clean up temp output PDB
+    try:
+        Path(output_pdb).unlink()
+    except Exception:
+        pass
+
+    return result
+
+
+def _parse_bfactor_scores(pdb_path: str, target_chain: str) -> list:
+    """
+    Parse per-residue PESTO scores from b-factor field of output PDB.
+    Returns list of {chain, res_id, resname, score, res_id_str} dicts.
+    """
+    seen     = {}   # (chain, res_id) → max score across atoms
+    resnames = {}
+
+    with open(pdb_path) as f:
+        for line in f:
+            if not line.startswith(("ATOM", "HETATM")):
+                continue
+            chain   = line[21].strip()
+            if chain != target_chain:
+                continue
+            try:
+                res_id  = int(line[22:26].strip())
+                resname = line[17:20].strip()
+                bfactor = float(line[60:66].strip())
+            except (ValueError, IndexError):
+                continue
+
+            key = (chain, res_id)
+            if key not in seen or bfactor > seen[key]:
+                seen[key]     = bfactor
+                resnames[key] = resname
+
+    results = []
+    for (chain, res_id), score in sorted(seen.items(), key=lambda x: x[0][1]):
+        results.append({
+            "chain":      chain,
+            "res_id":     res_id,
+            "resname":    resnames[(chain, res_id)],
+            "score":      round(score, 4),
+            "res_id_str": f"{chain}{res_id}",
+        })
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run PESTO on a PDB file.")
+    parser.add_argument("--pdb",       required=True, help="Input PDB path")
+    parser.add_argument("--chain",     default="A",   help="Chain to score")
+    parser.add_argument("--out",       required=True, help="Output JSON path")
+    parser.add_argument("--pesto_dir", required=True, help="Path to PeSTo repo")
+    parser.add_argument("--threshold", default=0.5,   type=float,
+                        help="Score threshold for hotspot calling (default: 0.5)")
+    parser.add_argument("--device",    default="cpu",
+                        choices=["cpu", "cuda"],
+                        help="Device to run inference on (default: cpu)")
+    args = parser.parse_args()
+
+    result = run_pesto(
+        pdb_path  = args.pdb,
+        chain     = args.chain,
+        out_path  = args.out,
+        pesto_dir = args.pesto_dir,
+        threshold = args.threshold,
+        device    = args.device,
+    )
+
+    print(f"Found {len(result['hotspots'])} hotspots above threshold {args.threshold}:")
+    for h in result["hotspots"][:10]:
+        score = next(r["score"] for r in result["residues"]
+                     if r["res_id_str"] == h)
+        print(f"  {h}: {score:.3f}")
+    if len(result["hotspots"]) > 10:
+        print(f"  ... and {len(result['hotspots']) - 10} more (see {args.out})")
