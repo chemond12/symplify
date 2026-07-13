@@ -45,14 +45,6 @@ python run.py --check   # validate configuration
 python run.py
 ```
 
-If on a remote cluster, access via SSH tunnel:
-
-```bash
-# On your local machine:
-ssh -L 8080:localhost:8080 yournetid@yourcluster.edu
-# Then open http://localhost:8080 in your browser
-```
-
 ---
 
 ## Configuration
