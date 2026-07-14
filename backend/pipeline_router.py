@@ -95,14 +95,18 @@ class PipelineRouter:
         with open(rfd3_cfg_path, "w") as f:
             json.dump(rfd3_config, f, indent=2)
 
-        env_vars    = {"CCD_MIRROR_PATH": self.paths.get("ccd_mirror", "")}
+        env_vars    = {
+            "CCD_MIRROR_PATH":         self.paths.get("ccd_mirror", ""),
+            "RFD3_CHECKPOINT":         self.paths.get("rfd3_checkpoint",
+                                       "/scratch/network/ch8337/foundry_weights/rfd3_latest.ckpt"),
+            "FOUNDRY_CHECKPOINT_DIRS": self.paths.get("foundry_weights_dir",
+                                       "/scratch/network/ch8337/foundry_weights"),
+        }
         module      = self.envs.get("base_module", "")
         rfd3_env    = self.envs.get("rfd3", "rfd3")
         bc_env      = self.envs.get("bindcraft", "BindCraft")
         bc_path     = self.paths.get("bindcraft_dir", "")
-        res         = self.resources
-
-        # Job 1: pilot RFD3 generation (100 designs) + LigandMPNN
+        res         = self.resources (100 designs) + LigandMPNN
         pilot_gen_cmd = (
             f"python {pipeline_script} "
             f"--config {rfd3_cfg_path} "
