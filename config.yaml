@@ -38,6 +38,7 @@ scheduler:
 environments:
   rfd3: "rfd3"             # Environment with rf3, foundry, ligandmpnn, biotite
   bindcraft: "BindCraft"   # Environment with pyrosetta, colabdesign, freesasa
+  pesto: "pesto"           # Environment for PESTO hotspot prediction
   base_module: "anaconda3/2025.12"  # Module to load before conda activate
 
 # Tool paths

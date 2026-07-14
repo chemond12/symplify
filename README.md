@@ -23,13 +23,40 @@ and C-terminus accessibility — with a GS linker attached, ready for phage disp
 
 ## Quick start
 
-### 1. Install
+### 1. Install Symplify
 
 ```bash
-git clone https://github.com/your-org/symplify
+git clone https://github.com/chemond12/symplify
 cd symplify
 pip install -r requirements.txt
 ```
+
+### 1b. Install PESTO (for protein hotspot identification)
+
+```bash
+git clone https://github.com/LBM-EPFL/PeSTo.git /path/to/PeSTo
+
+# Create conda environment manually (pesto.yml has version conflicts on modern systems)
+conda create -n pesto python=3.9 -y
+conda activate pesto
+conda install -c conda-forge h5py biopython tqdm -y
+
+# PyTorch CPU build avoids Intel MKL symbol conflicts on most clusters
+pip install torch==2.1.0+cpu torchvision==0.16.0+cpu \
+    --index-url https://download.pytorch.org/whl/cpu
+
+# Pin numpy for PyTorch 2.1 compatibility
+pip install "numpy<2.0" --force-reinstall
+
+# Older gemmi compatible with system libstdc++ on most HPC clusters
+pip install gemmi==0.5.8
+
+# Patch deprecated numpy alias in PESTO source
+sed -i 's/np\.object\b/object/g' \
+    /path/to/PeSTo/model/save/i_v4_1_2021-09-07_11-21/src/structure.py
+```
+
+Then set `paths.pesto_dir: /path/to/PeSTo` and `environments.pesto: pesto` in `config.yaml`.
 
 ### 2. Configure
 
@@ -43,6 +70,14 @@ python run.py --check   # validate configuration
 
 ```bash
 python run.py
+```
+
+If on a remote cluster, access via SSH tunnel:
+
+```bash
+# On your local machine:
+ssh -L 8080:localhost:8080 yournetid@yourcluster.edu
+# Then open http://localhost:8080 in your browser
 ```
 
 ---
