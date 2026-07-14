@@ -44,9 +44,11 @@ environments:
 # Tool paths
 paths:
   # Model weights
-  rfd3_weights:      "/path/to/foundry_weights/rfd3"
-  rf3_weights:       "/path/to/foundry_weights/rf3"
-  bindcraft_dir:     "/path/to/bindcraft/BindCraft"
+  rfd3_weights:          "/path/to/foundry_weights/rfd3"
+  rfd3_checkpoint:       "/path/to/foundry_weights/rfd3_latest.ckpt"
+  foundry_weights_dir:   "/path/to/foundry_weights"
+  rf3_weights:           "/path/to/foundry_weights/rf3"
+  bindcraft_dir:         "/path/to/bindcraft/BindCraft"
   # CCD mirror for RF3
   ccd_mirror:        "/path/to/ccd/mirror"
   # Working directory for all Symplify jobs
