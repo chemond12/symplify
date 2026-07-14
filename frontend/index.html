@@ -1854,8 +1854,8 @@ function StatusPage({ jobId, onResults, onNewJob }) {
     </div>
   );
 
-  const elapsed = job.updated_at && job.created_at
-    ? Math.round((job.updated_at - job.created_at) / 60) : 0;
+  const elapsed = job.created_at
+    ? Math.round((Date.now() / 1000 - job.created_at) / 60) : 0;
 
   return (
     <div className="status-page">
