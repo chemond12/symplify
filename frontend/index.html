@@ -1336,7 +1336,8 @@ function UploadPage({ onNext }) {
     try {
       const diff = await API.scoreTarget(file, targetType);
       onNext({ file, jobName, targetType, chain, hotspots,
-               linkerRep, nDesigns: nDesigns || diff.recommended_designs,
+               linkerRep,
+               nDesigns: nDesigns || (targetType === 'protein' ? 100 : null),
                targetPass,
                thresholds: { iptm: iptmThresh, ptm: ptmThresh, plddt,
                              rmsd, dg, delta_unsat_hbonds: unsatHbonds,
@@ -1586,13 +1587,10 @@ function DifficultyPage({ data, onBack, onSubmit }) {
              grade === 'Medium' ? 'Moderate challenge' :
              grade === 'Hard' ? 'Difficult target' : 'Very challenging target'}
           </h3>
-          <p className="rec-designs">
-            Recommended designs: <strong>{(data.nDesigns || difficulty.recommended_designs || 5000).toLocaleString()}</strong>
-            {data.targetType === 'small_molecule' && (
-              <span style={{color:'var(--grey-2)', fontSize:11, marginLeft:8}}>
-                (×8 LigandMPNN sequences each)
-              </span>
-            )}
+          <p className="rec-designs" style={{color:'var(--grey-2)', fontSize:12}}>
+            {data.targetType === 'protein'
+              ? 'BindCraft will generate 100 accepted designs by default — adjustable in Advanced settings'
+              : 'n_designs will be determined automatically after a 100-design pilot run'}
           </p>
         </div>
       </div>
@@ -1814,9 +1812,21 @@ const STAGE_LABELS = {
   bindcraft_design:      'BindCraft\nDesign',
 };
 
-function StatusPage({ jobId, onResults }) {
-  const [job,    setJob]    = useState(null);
-  const [stages, setStages] = useState([]);
+function StatusPage({ jobId, onResults, onNewJob }) {
+  const [job,        setJob]        = useState(null);
+  const [stages,     setStages]     = useState([]);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelConfirm, setCancelConfirm] = useState(false);
+
+  async function handleCancel() {
+    setCancelling(true);
+    try {
+      await fetch(`/api/jobs/${jobId}/cancel`, { method: 'POST' });
+      setCancelConfirm(false);
+    } catch(e) {
+      setCancelling(false);
+    }
+  }
 
   useEffect(() => {
     let alive = true;
@@ -1849,7 +1859,33 @@ function StatusPage({ jobId, onResults }) {
 
   return (
     <div className="status-page">
-      <div className="hero-eyebrow" style={{marginBottom:12}}>Design run</div>
+      <div style={{display:'flex', alignItems:'flex-start', justifyContent:'space-between', marginBottom:4}}>
+        <div className="hero-eyebrow">Design run</div>
+        {!['completed','failed','cancelled'].includes(job.status) && (
+          <div>
+            {cancelConfirm ? (
+              <div style={{display:'flex', alignItems:'center', gap:8}}>
+                <span style={{fontSize:12, color:'var(--grey-2)'}}>Cancel this job?</span>
+                <button className="btn-secondary" style={{padding:'6px 12px', fontSize:12,
+                        borderColor:'var(--red)', color:'var(--red)'}}
+                        onClick={handleCancel} disabled={cancelling}>
+                  {cancelling ? <Spinner /> : 'Yes, cancel'}
+                </button>
+                <button className="btn-secondary" style={{padding:'6px 12px', fontSize:12}}
+                        onClick={() => setCancelConfirm(false)}>
+                  Keep running
+                </button>
+              </div>
+            ) : (
+              <button className="btn-secondary"
+                      style={{padding:'6px 14px', fontSize:12}}
+                      onClick={() => setCancelConfirm(true)}>
+                Cancel job
+              </button>
+            )}
+          </div>
+        )}
+      </div>
       <h1 className="page-title">{job.name}</h1>
       <p className="page-sub" style={{marginBottom:32}}>
         Job submitted to cluster — polling for updates every 8 seconds.
@@ -1934,7 +1970,15 @@ function StatusPage({ jobId, onResults }) {
         </div>
       )}
 
-      {job.status === 'completed' && (
+      {job.status === 'cancelled' && (
+        <div style={{background:'rgba(126,149,184,0.1)', border:'1px solid var(--grey-3)',
+                     borderRadius:'var(--radius)', padding:16, marginBottom:16,
+                     color:'var(--grey-2)', fontSize:13, textAlign:'center'}}>
+          Job cancelled. <button className="btn-secondary"
+            style={{marginLeft:12, padding:'4px 12px', fontSize:12}}
+            onClick={onNewJob}>Start new job</button>
+        </div>
+      )}
         <div style={{textAlign:'center', padding:'24px 0'}}>
           <button className="btn-primary" style={{width:'auto', padding:'12px 40px'}}
                   onClick={onResults}>
@@ -2251,7 +2295,8 @@ function App() {
       )}
 
       {page === 'status' && jobId && (
-        <StatusPage jobId={jobId} onResults={() => setPage('results')} />
+        <StatusPage jobId={jobId} onResults={() => setPage('results')}
+                    onNewJob={() => setPage('upload')} />
       )}
 
       {page === 'results' && jobId && (
