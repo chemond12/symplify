@@ -2,7 +2,7 @@
 db.py
 -----
 SQLite-based job and result tracking for Symplify.
-Stores job metadata, pipeline stage status, and result summaries.
+Stores job metadata, pipeline stage status, pilot results, and result summaries.
 """
 
 import json
@@ -35,25 +35,26 @@ def init_db():
     with get_db() as conn:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS jobs (
-            id              TEXT PRIMARY KEY,
-            name            TEXT NOT NULL,
-            target_type     TEXT NOT NULL,      -- 'protein' or 'small_molecule'
-            target_file     TEXT,
-            config          TEXT,               -- JSON blob of job parameters
-            status          TEXT DEFAULT 'pending',
-            created_at      REAL,
-            updated_at      REAL,
-            difficulty      REAL,
-            difficulty_grade TEXT,
-            difficulty_report TEXT,             -- JSON
-            error           TEXT
+            id                  TEXT PRIMARY KEY,
+            name                TEXT NOT NULL,
+            target_type         TEXT NOT NULL,
+            target_file         TEXT,
+            config              TEXT,
+            status              TEXT DEFAULT 'pending',
+            created_at          REAL,
+            updated_at          REAL,
+            difficulty          REAL,
+            difficulty_grade    TEXT,
+            difficulty_report   TEXT,
+            pilot_results       TEXT,   -- JSON: pilot batch metrics + recommendation
+            error               TEXT
         );
 
         CREATE TABLE IF NOT EXISTS stages (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             job_id          TEXT NOT NULL,
             stage_name      TEXT NOT NULL,
-            scheduler_id    TEXT,               -- cluster job ID
+            scheduler_id    TEXT,
             status          TEXT DEFAULT 'pending',
             started_at      REAL,
             finished_at     REAL,
@@ -68,7 +69,7 @@ def init_db():
             design_name     TEXT,
             pdb_path        TEXT,
             linker_pdb_path TEXT,
-            metrics         TEXT,               -- JSON blob of all metrics
+            metrics         TEXT,
             FOREIGN KEY (job_id) REFERENCES jobs(id)
         );
         """)
@@ -109,13 +110,48 @@ def update_job_difficulty(job_id: str, report):
                difficulty_report=?, updated_at=? WHERE id=?""",
             (report.overall, report.grade,
              json.dumps({
-                 "overall": report.overall,
-                 "grade":   report.grade,
-                 "factors": report.factors,
-                 "warnings": report.warnings,
+                 "overall":             report.overall,
+                 "grade":               report.grade,
+                 "factors":             report.factors,
+                 "warnings":            report.warnings,
                  "recommended_designs": report.recommended_designs,
              }),
              time.time(), job_id)
+        )
+
+
+def update_pilot_results(job_id: str, pilot: dict):
+    """
+    Store pilot batch results and set status to 'awaiting_confirmation'.
+    pilot dict contains:
+      n_pilot, n_passing, pass_rate, iptm_values, median_iptm,
+      top10_iptm, recommended_n_designs, thresholds_used
+    """
+    with get_db() as conn:
+        conn.execute(
+            """UPDATE jobs SET pilot_results=?, status='awaiting_confirmation',
+               updated_at=? WHERE id=?""",
+            (json.dumps(pilot), time.time(), job_id)
+        )
+
+
+def confirm_full_run(job_id: str, n_designs: int):
+    """
+    User confirmed full run. Update config with chosen n_designs
+    and set status back to running.
+    """
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT config FROM jobs WHERE id=?", (job_id,)
+        ).fetchone()
+        if not row:
+            return
+        config = json.loads(row["config"] or "{}")
+        config["n_designs"] = n_designs
+        conn.execute(
+            """UPDATE jobs SET config=?, status='running',
+               updated_at=? WHERE id=?""",
+            (json.dumps(config), time.time(), job_id)
         )
 
 
@@ -126,7 +162,15 @@ def get_job(job_id: str) -> dict:
         ).fetchone()
         if not row:
             return None
-        return dict(row)
+        d = dict(row)
+        # Parse JSON fields
+        for field in ("config", "difficulty_report", "pilot_results"):
+            if d.get(field):
+                try:
+                    d[field] = json.loads(d[field])
+                except Exception:
+                    pass
+        return d
 
 
 def list_jobs() -> list:
@@ -143,6 +187,9 @@ def list_jobs() -> list:
 
 STAGE_NAMES = {
     "rfd3": [
+        "pilot_generation",
+        "pilot_rf3_scoring",
+        "awaiting_confirmation",
         "rfd3_generation",
         "ligandmpnn",
         "rf3_scoring",
@@ -156,7 +203,6 @@ STAGE_NAMES = {
 
 
 def init_stages(job_id: str, target_type: str):
-    """Create stage rows for a new job."""
     stages = STAGE_NAMES.get(
         "rfd3" if target_type == "small_molecule" else "bindcraft", []
     )
@@ -199,7 +245,6 @@ def get_stages(job_id: str) -> list:
 # ---------------------------------------------------------------------------
 
 def save_results(job_id: str, ranked_rows: list):
-    """Save ranked design results to the database."""
     with get_db() as conn:
         conn.execute("DELETE FROM results WHERE job_id=?", (job_id,))
         for row in ranked_rows:

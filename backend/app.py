@@ -149,9 +149,11 @@ def get_job(job_id):
                 stage["status"] = new_status
 
     job["stages"] = stages
-    job["config"] = json.loads(job["config"]) if job.get("config") else {}
-    if job.get("difficulty_report"):
-        job["difficulty_report"] = json.loads(job["difficulty_report"])
+    if job.get("difficulty_report") and isinstance(job["difficulty_report"], str):
+        try:
+            job["difficulty_report"] = json.loads(job["difficulty_report"])
+        except Exception:
+            pass
 
     return jsonify(job)
 
@@ -194,6 +196,33 @@ def cancel_job(job_id):
 
     db.update_job_status(job_id, "cancelled")
     return jsonify({"cancelled_stages": cancelled})
+
+
+@app.route("/api/jobs/<job_id>/confirm", methods=["POST"])
+def confirm_job(job_id):
+    """
+    User confirms full run after reviewing pilot results.
+    Expects JSON body: {"n_designs": 5000}
+    """
+    job = db.get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    if job.get("status") != "awaiting_confirmation":
+        return jsonify({"error": f"Job is not awaiting confirmation (status: {job.get('status')})"}), 400
+
+    body      = request.get_json() or {}
+    n_designs = int(body.get("n_designs", 5000))
+
+    def run():
+        try:
+            router.confirm_full_run(job_id, n_designs)
+        except Exception as e:
+            db.update_job_status(job_id, "failed", str(e))
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+
+    return jsonify({"status": "full_run_submitted", "n_designs": n_designs})
 
 
 # ---------------------------------------------------------------------------
