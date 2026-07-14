@@ -27,31 +27,40 @@ class HotspotResult:
 # ---------------------------------------------------------------------------
 
 def find_protein_hotspots(pdb_path: str, chain: str = "A",
-                            pesto_dir: Optional[str] = None) -> HotspotResult:
+                           pesto_dir: Optional[str] = None,
+                           pesto_env: str = "pesto") -> HotspotResult:
     """
     Identify protein binding hotspots.
     Uses PESTO if available, otherwise falls back to B-factor + surface exposure.
+
+    Parameters
+    ----------
+    pdb_path  : path to target PDB
+    chain     : chain ID to score
+    pesto_dir : path to PeSTo repository root (from config.yaml paths.pesto_dir)
+    pesto_env : conda environment name for PESTO (from config.yaml environments.pesto)
     """
     if pesto_dir and Path(pesto_dir).exists():
-        result = _run_pesto(pdb_path, chain, pesto_dir)
+        result = _run_pesto(pdb_path, chain, pesto_dir, pesto_env)
         if result:
             return result
 
     return _protein_hotspot_fallback(pdb_path, chain)
 
 
-def _run_pesto(pdb_path: str, chain: str, pesto_dir: str) -> Optional[HotspotResult]:
+def _run_pesto(pdb_path: str, chain: str, pesto_dir: str,
+               pesto_env: str = "pesto") -> Optional[HotspotResult]:
     """
-    Run PESTO via pesto_predict.py and parse JSON output.
+    Run PESTO via pesto_predict.py in its own conda environment and parse JSON output.
     PESTO stores scores in b-factor field (0=no interface, 1=interface).
+
+    Invoked via `conda run -n pesto_env python pesto_predict.py ...` so that
+    the correct PyTorch/gemmi/numpy versions are used regardless of which
+    environment the Symplify server itself is running in.
     """
     import tempfile
 
-    # pesto_predict.py lives in the Symplify backend directory
     predict_script = Path(__file__).resolve().parent / "pesto_predict.py"
-    if not predict_script.exists():
-        # Also check repo root
-        predict_script = Path(__file__).resolve().parent.parent / "pesto_predict.py"
     if not predict_script.exists():
         return None
 
@@ -60,7 +69,8 @@ def _run_pesto(pdb_path: str, chain: str, pesto_dir: str) -> Optional[HotspotRes
             out_path = tmp.name
 
         result = subprocess.run(
-            ["python", str(predict_script),
+            ["conda", "run", "-n", pesto_env, "--no-capture-output",
+             "python", str(predict_script),
              "--pdb",       pdb_path,
              "--chain",     chain,
              "--out",       out_path,
@@ -74,6 +84,10 @@ def _run_pesto(pdb_path: str, chain: str, pesto_dir: str) -> Optional[HotspotRes
             print(f"[PESTO] Error: {result.stderr[:500]}")
             return None
 
+        if not Path(out_path).exists():
+            print("[PESTO] Output JSON not found after run")
+            return None
+
         with open(out_path) as f:
             data = json.load(f)
 
@@ -83,7 +97,6 @@ def _run_pesto(pdb_path: str, chain: str, pesto_dir: str) -> Optional[HotspotRes
         if not hotspots:
             return None
 
-        # Build scores dict for display
         scores = {r["res_id_str"]: r["score"]
                   for r in data.get("residues", [])}
 
@@ -92,9 +105,9 @@ def _run_pesto(pdb_path: str, chain: str, pesto_dir: str) -> Optional[HotspotRes
             method     = "pesto",
             confidence = "high",
             details    = {
-                "scores":    scores,
-                "threshold": data.get("threshold", 0.5),
-                "model":     data.get("model", "i_v4_1"),
+                "scores":            scores,
+                "threshold":         data.get("threshold", 0.5),
+                "model":             data.get("model", "i_v4_1"),
                 "n_residues_scored": len(data.get("residues", [])),
             }
         )
