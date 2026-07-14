@@ -139,14 +139,24 @@ def get_job(job_id):
 
     stages = db.get_stages(job_id)
 
-    # Poll scheduler for live stage updates
+    # Poll scheduler for live stage updates for any stage with a scheduler ID
     for stage in stages:
-        if stage["status"] == "running" and stage.get("scheduler_id"):
+        if stage.get("scheduler_id") and stage["status"] not in ("completed", "failed", "cancelled"):
             live = router.scheduler.status(stage["scheduler_id"])
-            if live.state != stage["status"].upper():
-                new_status = live.state.lower()
-                db.update_stage(job_id, stage["stage_name"], new_status)
-                stage["status"] = new_status
+            mapped = live.state.lower()
+            # Map SLURM states to our states
+            if live.state == "RUNNING" and stage["status"] != "running":
+                db.update_stage(job_id, stage["stage_name"], "running")
+                stage["status"] = "running"
+            elif live.state == "COMPLETED" and stage["status"] != "completed":
+                db.update_stage(job_id, stage["stage_name"], "completed")
+                stage["status"] = "completed"
+            elif live.state == "FAILED" and stage["status"] != "failed":
+                db.update_stage(job_id, stage["stage_name"], "failed")
+                stage["status"] = "failed"
+            elif live.state == "PENDING" and stage["status"] not in ("pending", "running"):
+                db.update_stage(job_id, stage["stage_name"], "pending")
+                stage["status"] = "pending"
 
     job["stages"] = stages
     if job.get("difficulty_report") and isinstance(job["difficulty_report"], str):
