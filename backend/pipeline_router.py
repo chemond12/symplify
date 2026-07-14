@@ -26,7 +26,53 @@ import db
 from job_manager import get_scheduler, JobSpec
 
 
-class PipelineRouter:
+# ---------------------------------------------------------------------------
+# Ligand detection helpers
+# ---------------------------------------------------------------------------
+
+def _detect_ligand(pdb_path: str) -> str:
+    """Extract residue name of first HETATM record (non-water)."""
+    waters = {"HOH", "WAT", "H2O"}
+    try:
+        with open(pdb_path) as f:
+            for line in f:
+                if line.startswith("HETATM"):
+                    resname = line[17:20].strip()
+                    if resname not in waters:
+                        return resname
+    except Exception:
+        pass
+    return "LIG"
+
+
+def _detect_ligand_chain(pdb_path: str) -> str:
+    """Extract chain ID of first HETATM record (non-water)."""
+    waters = {"HOH", "WAT", "H2O"}
+    try:
+        with open(pdb_path) as f:
+            for line in f:
+                if line.startswith("HETATM"):
+                    resname = line[17:20].strip()
+                    if resname not in waters:
+                        return line[21].strip() or "A"
+    except Exception:
+        pass
+    return "A"
+
+
+def _detect_ligand_resnum(pdb_path: str) -> str:
+    """Extract residue number of first HETATM record (non-water)."""
+    waters = {"HOH", "WAT", "H2O"}
+    try:
+        with open(pdb_path) as f:
+            for line in f:
+                if line.startswith("HETATM"):
+                    resname = line[17:20].strip()
+                    if resname not in waters:
+                        return line[22:26].strip()
+    except Exception:
+        pass
+    return "1"
     def __init__(self, cfg):
         self.cfg       = cfg
         self.scheduler = get_scheduler(cfg["scheduler"])
@@ -83,15 +129,26 @@ class PipelineRouter:
         pipeline_script = self.pipeline_dir / "rfd3" / "pipeline_rfd3.py"
         pilot_script    = self.pipeline_dir / "rfd3" / "pilot_rf3.py"
 
-        rfd3_cfg_path = str(job_dir / "rfd3_config.json")
+        # Detect ligand residue name and chain from the input PDB
+        ligand_resname = config.get("ligand_resname") or _detect_ligand(target_file)
+        ligand_chain   = config.get("ligand_chain")   or _detect_ligand_chain(target_file)
+        ligand_resnum  = config.get("ligand_resnum")  or _detect_ligand_resnum(target_file)
+        ligand_key     = f"{ligand_chain}{ligand_resnum}"
+
+        example_name  = f"symplify_{job_id[:8]}"
         rfd3_config   = {
-            "task_name": f"symplify_{job_id[:8]}",
-            "ligand":    config.get("ligand_resname", "LIG"),
-            "length":    config.get("length", "80-150"),
-            "example":   "buried",
+            example_name: {
+                "input":               target_file,
+                "length":              config.get("length", "80-150"),
+                "ligand":              ligand_resname,
+                "select_fixed_atoms":  {ligand_key: "ALL"},
+                "select_buried":       {ligand_key: "ALL"},
+            }
         }
         if hotspots:
-            rfd3_config["select_buried"] = {h: "ALL" for h in hotspots}
+            rfd3_config[example_name]["select_buried"] = {h: "ALL" for h in hotspots}
+
+        rfd3_cfg_path = str(job_dir / "rfd3_config.json")
         with open(rfd3_cfg_path, "w") as f:
             json.dump(rfd3_config, f, indent=2)
 
@@ -106,7 +163,7 @@ class PipelineRouter:
         rfd3_env    = self.envs.get("rfd3", "rfd3")
         bc_env      = self.envs.get("bindcraft", "BindCraft")
         bc_path     = self.paths.get("bindcraft_dir", "")
-        res         = self.resources (100 designs) + LigandMPNN
+        res         = self.resources
         pilot_gen_cmd = (
             f"python {pipeline_script} "
             f"--config {rfd3_cfg_path} "
@@ -175,7 +232,13 @@ class PipelineRouter:
         pipeline_script = self.pipeline_dir / "rfd3" / "pipeline_rfd3.py"
         rfd3_cfg_path   = str(job_dir / "rfd3_config.json")
 
-        env_vars    = {"CCD_MIRROR_PATH": self.paths.get("ccd_mirror", "")}
+        env_vars    = {
+            "CCD_MIRROR_PATH":         self.paths.get("ccd_mirror", ""),
+            "RFD3_CHECKPOINT":         self.paths.get("rfd3_checkpoint",
+                                       "/scratch/network/ch8337/foundry_weights/rfd3_latest.ckpt"),
+            "FOUNDRY_CHECKPOINT_DIRS": self.paths.get("foundry_weights_dir",
+                                       "/scratch/network/ch8337/foundry_weights"),
+        }
         module      = self.envs.get("base_module", "")
         rfd3_env    = self.envs.get("rfd3", "rfd3")
         bc_env      = self.envs.get("bindcraft", "BindCraft")
