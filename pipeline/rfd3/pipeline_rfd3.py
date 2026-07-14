@@ -60,7 +60,9 @@ from rosetta_analysis import run_rosetta_batch
 
 def run_rfd3(config_path: str, input_pdb: str,
               output_dir: Path, n_designs: int) -> list:
-    """Run RFDiffusion3 backbone generation. Returns list of output JSON paths."""
+    """Run RFDiffusion3 backbone generation via CLI. Returns list of output JSON paths."""
+    import subprocess
+
     print(f"\n{'='*60}")
     print(f"[Stage 1] RFDiffusion3 backbone generation ({n_designs} designs)")
     print(f"{'='*60}")
@@ -68,24 +70,31 @@ def run_rfd3(config_path: str, input_pdb: str,
     rfd3_dir = output_dir / "rfd3_outputs"
     rfd3_dir.mkdir(exist_ok=True)
 
-    # Load config
+    # Load config to get n_batches / batch_size
     with open(config_path) as f:
         config = json.load(f)
 
-    from foundry import Foundry
-    foundry = Foundry(
-        ckpt_path=os.environ.get(
-            "RFD3_WEIGHTS",
-            "/scratch/network/ch8337/foundry_weights/rfd3"
-        )
+    ckpt_path = os.environ.get(
+        "RFD3_CHECKPOINT",
+        "/scratch/network/ch8337/foundry_weights/rfd3_latest.ckpt"
     )
 
-    results = foundry.run(
-        input_pdb   = input_pdb,
-        config      = config,
-        n_designs   = n_designs,
-        output_dir  = str(rfd3_dir),
-    )
+    # RFD3 generates diffusion_batch_size * n_batches designs
+    # Use batch_size=10 to match existing workflow
+    batch_size = 10
+    n_batches  = max(1, n_designs // batch_size)
+
+    cmd = [
+        "rfd3", "design",
+        f"out_dir={rfd3_dir}",
+        f"ckpt_path={ckpt_path}",
+        f"inputs={config_path}",
+        f"diffusion_batch_size={batch_size}",
+        f"n_batches={n_batches}",
+    ]
+
+    print(f"  Running: {' '.join(cmd)}")
+    result = subprocess.run(cmd, check=True)
 
     json_paths = sorted(rfd3_dir.glob("*.json"))
     print(f"  Generated {len(json_paths)} backbone designs.")
@@ -100,8 +109,13 @@ def run_ligandmpnn(rfd3_json_paths: list, output_dir: Path,
                     mpnn_per_bb: int = 8) -> list:
     """
     Run LigandMPNN to design sequences for each backbone.
+    Uses MPNNInferenceEngine matching the working fentanyl_project script.
     Returns list of output CIF paths.
     """
+    import gzip
+    from atomworks.io.parser import parse
+    from mpnn.inference_engines.mpnn import MPNNInferenceEngine
+
     print(f"\n{'='*60}")
     print(f"[Stage 2] LigandMPNN sequence design ({mpnn_per_bb} sequences/backbone)")
     print(f"{'='*60}")
@@ -110,22 +124,54 @@ def run_ligandmpnn(rfd3_json_paths: list, output_dir: Path,
     mpnn_dir.mkdir(exist_ok=True)
 
     # Build CIF paths from RFD3 JSON paths
-    cif_paths = [p.replace(".json", ".cif.gz") for p in rfd3_json_paths
-                 if Path(p.replace(".json", ".cif.gz")).exists()]
-    cif_paths += [p.replace(".json", ".cif") for p in rfd3_json_paths
-                  if Path(p.replace(".json", ".cif")).exists()
-                  and not Path(p.replace(".json", ".cif.gz")).exists()]
+    cif_paths = []
+    for json_path in rfd3_json_paths:
+        for ext in (".cif.gz", ".cif"):
+            cif = json_path.replace(".json", ext)
+            if Path(cif).exists():
+                cif_paths.append(cif)
+                break
 
     print(f"  Running LigandMPNN on {len(cif_paths)} backbones...")
 
-    from rc_foundry.ligandmpnn import run_ligandmpnn as _run_mpnn
-    _run_mpnn(
-        input_cifs   = cif_paths,
-        output_dir   = str(mpnn_dir),
-        num_seq      = mpnn_per_bb,
-    )
+    output_cifs = []
+    for cif_path in cif_paths:
+        name    = Path(cif_path).name.replace(".cif.gz", "").replace(".cif", "")
+        out_dir = mpnn_dir / name
+        out_dir.mkdir(exist_ok=True)
 
-    output_cifs = sorted(mpnn_dir.rglob("*.cif"))
+        # Decompress if needed
+        if cif_path.endswith(".gz"):
+            tmp = f"/tmp/{name}.cif"
+            with gzip.open(cif_path, "rb") as f_in, open(tmp, "wb") as f_out:
+                f_out.write(f_in.read())
+            cif_for_parse = tmp
+        else:
+            cif_for_parse = cif_path
+
+        try:
+            result = parse(cif_for_parse)
+            aa     = result["asym_unit"]
+
+            engine = MPNNInferenceEngine(
+                model_type         = "ligand_mpnn",
+                is_legacy_weights  = True,
+                out_directory      = str(out_dir),
+                write_structures   = True,
+                write_fasta        = True,
+            )
+            engine.run(
+                input_dicts  = [{"batch_size": mpnn_per_bb, "remove_waters": True}],
+                atom_arrays  = [aa],
+            )
+            output_cifs.extend(sorted(out_dir.glob("*.cif")))
+        except Exception as e:
+            print(f"  [WARN] LigandMPNN failed for {name}: {e}")
+
+        # Clean up temp file
+        if cif_path.endswith(".gz") and Path(f"/tmp/{name}.cif").exists():
+            Path(f"/tmp/{name}.cif").unlink()
+
     print(f"  LigandMPNN generated {len(output_cifs)} sequences.")
     return [str(p) for p in output_cifs]
 
