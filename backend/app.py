@@ -240,24 +240,36 @@ def get_structure(job_id, rank):
 
 @app.route("/api/jobs/<job_id>/cancel", methods=["POST"])
 def cancel_job(job_id):
+    import subprocess as _sp
     job = db.get_job(job_id)
     if not job:
         return jsonify({"error": "Job not found"}), 404
 
-    stages = db.get_stages(job_id)
+    stages    = db.get_stages(job_id)
     cancelled = []
+    job_short = job_id[:8]
+
+    # Cancel each stage by its scheduler ID
     for stage in stages:
-        # Cancel any stage with a scheduler ID regardless of DB status —
-        # pending (queued) jobs need to be cancelled too
-        if stage.get("scheduler_id") and stage["status"] not in ("completed", "failed", "cancelled"):
-            ok = router.scheduler.cancel(stage["scheduler_id"])
-            if ok:
+        sid = stage.get("scheduler_id")
+        if sid and stage["status"] not in ("completed",):
+            try:
+                _sp.run(["scancel", str(sid)], capture_output=True, timeout=10)
                 db.update_stage(job_id, stage["stage_name"], "failed")
                 cancelled.append(stage["stage_name"])
+            except Exception:
+                pass
+
+    # Belt-and-suspenders: cancel by job name for each stage
+    for suffix in ["pilot_gen", "pilot_rf3", "gen", "rf3", "post", "bc"]:
+        try:
+            _sp.run(["scancel", f"--name=sym_{job_short}_{suffix}"],
+                    capture_output=True, timeout=10)
+        except Exception:
+            pass
 
     db.update_job_status(job_id, "cancelled")
     return jsonify({"cancelled_stages": cancelled})
-
 
 @app.route("/api/jobs/<job_id>/confirm", methods=["POST"])
 def confirm_job(job_id):
