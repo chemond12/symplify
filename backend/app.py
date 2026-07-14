@@ -247,7 +247,9 @@ def cancel_job(job_id):
     stages = db.get_stages(job_id)
     cancelled = []
     for stage in stages:
-        if stage["status"] == "running" and stage.get("scheduler_id"):
+        # Cancel any stage with a scheduler ID regardless of DB status —
+        # pending (queued) jobs need to be cancelled too
+        if stage.get("scheduler_id") and stage["status"] not in ("completed", "failed", "cancelled"):
             ok = router.scheduler.cancel(stage["scheduler_id"])
             if ok:
                 db.update_stage(job_id, stage["stage_name"], "failed")
