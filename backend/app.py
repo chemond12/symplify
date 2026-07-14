@@ -251,7 +251,8 @@ def find_hotspots():
         if target_type == "protein":
             result = find_protein_hotspots(
                 str(tmp_path), chain,
-                pesto_dir=CFG.get("paths", {}).get("pesto_dir")
+                pesto_dir=CFG.get("paths", {}).get("pesto_dir"),
+                pesto_env=CFG.get("environments", {}).get("pesto", "pesto"),
             )
         else:
             result = find_small_molecule_features(str(tmp_path))
