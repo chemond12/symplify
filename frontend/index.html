@@ -1979,6 +1979,8 @@ function StatusPage({ jobId, onResults, onNewJob }) {
             onClick={onNewJob}>Start new job</button>
         </div>
       )}
+
+      {job.status === 'completed' && (
         <div style={{textAlign:'center', padding:'24px 0'}}>
           <button className="btn-primary" style={{width:'auto', padding:'12px 40px'}}
                   onClick={onResults}>
