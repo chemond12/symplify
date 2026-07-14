@@ -287,7 +287,22 @@ def _load_molecule(path: str):
         elif path.endswith(".mol2"):
             return Chem.MolFromMol2File(path)
         elif path.endswith(".pdb"):
-            return Chem.MolFromPDBFile(path, sanitize=False)
+            mol = Chem.MolFromPDBFile(path, sanitize=False, removeHs=False)
+            if mol is None:
+                return None
+            try:
+                Chem.SanitizeMol(mol)
+            except Exception:
+                # Try partial sanitization — at minimum initialize ring info
+                try:
+                    Chem.SanitizeMol(mol, Chem.SanitizeFlags.SANITIZE_FINDRADICALS |
+                                          Chem.SanitizeFlags.SANITIZE_SETAROMATICITY |
+                                          Chem.SanitizeFlags.SANITIZE_SETCONJUGATION |
+                                          Chem.SanitizeFlags.SANITIZE_SETHYBRIDIZATION |
+                                          Chem.SanitizeFlags.SANITIZE_SYMMRINGS)
+                except Exception:
+                    pass
+            return mol
         elif path.endswith((".cif", ".cif.gz")):
             # Extract SMILES via CCDC or just return None
             return None
