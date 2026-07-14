@@ -608,6 +608,150 @@
 
   .stage-label.active { color: var(--teal); }
 
+  /* Pilot results panel */
+  .pilot-panel {
+    background: var(--navy-mid);
+    border: 2px solid var(--teal);
+    border-radius: var(--radius-lg);
+    padding: 32px;
+    margin-bottom: 24px;
+  }
+
+  .pilot-panel h2 {
+    font-family: var(--font-display);
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--teal);
+    margin-bottom: 6px;
+  }
+
+  .pilot-panel .pilot-sub {
+    color: var(--grey-2);
+    font-size: 13px;
+    margin-bottom: 24px;
+  }
+
+  .pilot-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+
+  .pilot-stat {
+    background: var(--navy);
+    border: 1px solid var(--grey-3);
+    border-radius: var(--radius);
+    padding: 16px;
+    text-align: center;
+  }
+
+  .pilot-stat-value {
+    font-family: var(--font-display);
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--white);
+    line-height: 1;
+    margin-bottom: 4px;
+  }
+
+  .pilot-stat-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--grey-2);
+  }
+
+  .pilot-histogram {
+    background: var(--navy);
+    border: 1px solid var(--grey-3);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 24px;
+  }
+
+  .pilot-histogram h4 {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--grey-2);
+    margin-bottom: 12px;
+  }
+
+  .hist-bars {
+    display: flex;
+    align-items: flex-end;
+    gap: 3px;
+    height: 80px;
+  }
+
+  .hist-bar {
+    flex: 1;
+    border-radius: 2px 2px 0 0;
+    transition: height 0.4s ease;
+    min-height: 2px;
+  }
+
+  .hist-labels {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 4px;
+  }
+
+  .hist-labels span {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--grey-3);
+  }
+
+  .pilot-confirm {
+    background: var(--navy);
+    border: 1px solid var(--grey-3);
+    border-radius: var(--radius);
+    padding: 20px;
+  }
+
+  .pilot-confirm h4 {
+    font-family: var(--font-display);
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 16px;
+  }
+
+  .confirm-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+
+  .confirm-row label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--grey-2);
+    white-space: nowrap;
+  }
+
+  .confirm-row .input {
+    width: 120px;
+  }
+
+  .confirm-row .btn-primary {
+    width: auto;
+    padding: 10px 28px;
+    white-space: nowrap;
+  }
+
+  .pilot-rec {
+    font-size: 12px;
+    color: var(--teal);
+    font-family: var(--font-mono);
+  }
+
   .status-meta {
     background: var(--navy-mid);
     border: 1px solid var(--grey-3);
@@ -1160,8 +1304,18 @@ function UploadPage({ onNext }) {
   const [hotInput,   setHotInput]   = useState('');
   const [linkerRep,  setLinkerRep]  = useState(3);
   const [nDesigns,   setNDesigns]   = useState('');
+  const [targetPass, setTargetPass] = useState(96);
   const [showAdv,    setShowAdv]    = useState(false);
   const [loading,    setLoading]    = useState(false);
+  // Metric thresholds
+  const [iptmThresh,  setIptmThresh]  = useState(0.8);
+  const [ptmThresh,   setPtmThresh]   = useState(0.8);
+  const [plddt,       setPlddt]       = useState(0.8);
+  const [rmsd,        setRmsd]        = useState(2.5);
+  const [dg,          setDg]          = useState(-20);
+  const [unsatHbonds, setUnsatHbonds] = useState(2);
+  const [hydrophob,   setHydrophob]   = useState(0.25);
+  const [minIpae,     setMinIpae]     = useState(1.0);
 
   function handleFile(f) {
     if (!f) return;
@@ -1180,10 +1334,14 @@ function UploadPage({ onNext }) {
     if (!file) return;
     setLoading(true);
     try {
-      // Score difficulty first
       const diff = await API.scoreTarget(file, targetType);
       onNext({ file, jobName, targetType, chain, hotspots,
                linkerRep, nDesigns: nDesigns || diff.recommended_designs,
+               targetPass,
+               thresholds: { iptm: iptmThresh, ptm: ptmThresh, plddt,
+                             rmsd, dg, delta_unsat_hbonds: unsatHbonds,
+                             surface_hydrophobicity: hydrophob,
+                             min_ipae: minIpae },
                difficulty: diff });
     } catch(e) {
       setLoading(false);
@@ -1303,11 +1461,41 @@ function UploadPage({ onNext }) {
                 </div>
               )}
               <div className="field-group" style={{marginBottom:0}}>
-                <span className="field-label">Override n_designs</span>
-                <input className="input" type="number" placeholder="Auto"
-                       value={nDesigns} onChange={e => setNDesigns(e.target.value)} />
-                <div className="hint">Leave blank to use difficulty-based recommendation</div>
+                <span className="field-label">Target passing designs</span>
+                <input className="input" type="number" value={targetPass}
+                       onChange={e => setTargetPass(+e.target.value)} />
+                <div className="hint">Used to recommend n_designs (default: 96 = one plate)</div>
               </div>
+              {targetType === 'small_molecule' && (
+                <div className="field-group" style={{marginBottom:0}}>
+                  <span className="field-label">Override n_designs</span>
+                  <input className="input" type="number" placeholder="Auto (pilot-based)"
+                         value={nDesigns} onChange={e => setNDesigns(e.target.value)} />
+                </div>
+              )}
+            </div>
+            <div style={{marginTop:16, marginBottom:8}}>
+              <span className="field-label">Metric thresholds</span>
+            </div>
+            <div className="advanced-grid">
+              {[
+                ['ipTM threshold',       iptmThresh,  setIptmThresh,  0, 1, 0.01],
+                ['pTM threshold',        ptmThresh,   setPtmThresh,   0, 1, 0.01],
+                ['pLDDT threshold',      plddt,       setPlddt,       0, 1, 0.01],
+                ['min ipAE threshold',   minIpae,     setMinIpae,     0, 5, 0.1],
+                ['RMSD threshold (Å)',   rmsd,        setRmsd,        0, 10, 0.1],
+                ['ΔG threshold',         dg,          setDg,          -200, 0, 1],
+                ['Max unsat H-bonds',    unsatHbonds, setUnsatHbonds, 0, 10, 1],
+                ['Max surface hydrophob',hydrophob,   setHydrophob,   0, 1, 0.01],
+              ].map(([label, val, setter, min, max, step]) => (
+                <div key={label} className="field-group" style={{marginBottom:0}}>
+                  <span className="field-label">{label}</span>
+                  <input className="input" type="number"
+                         min={min} max={max} step={step}
+                         value={val}
+                         onChange={e => setter(parseFloat(e.target.value))} />
+                </div>
+              ))}
             </div>
           </div>
         )}
@@ -1355,7 +1543,13 @@ function DifficultyPage({ data, onBack, onSubmit }) {
     const job = await API.createJob(
       file, data.jobName, targetType,
       { hotspots, linker_repeats: data.linkerRep,
-        n_designs: data.nDesigns, chain: data.chain }
+        n_designs: data.nDesigns, chain: data.chain,
+        target_passing:     data.targetPass || 96,
+        iptm_threshold:     data.thresholds?.iptm     || 0.8,
+        ptm_threshold:      data.thresholds?.ptm      || 0.8,
+        min_ipae_threshold: data.thresholds?.min_ipae || 1.0,
+        thresholds:         data.thresholds || {},
+      }
     );
     onSubmit(job.job_id);
   }
@@ -1482,14 +1676,142 @@ function DifficultyPage({ data, onBack, onSubmit }) {
 }
 
 // ============================================================
+// Pilot histogram component
+// ============================================================
+function PilotHistogram({ iptmValues, threshold }) {
+  if (!iptmValues || iptmValues.length === 0) return null;
+
+  const bins    = 20;
+  const min     = 0, max = 1;
+  const width   = (max - min) / bins;
+  const counts  = Array(bins).fill(0);
+  iptmValues.forEach(v => {
+    const i = Math.min(Math.floor((v - min) / width), bins - 1);
+    counts[i]++;
+  });
+  const maxCount = Math.max(...counts, 1);
+  const threshBin = Math.floor((threshold - min) / width);
+
+  return (
+    <div className="pilot-histogram">
+      <h4>ipTM distribution ({iptmValues.length} designs)</h4>
+      <div className="hist-bars">
+        {counts.map((c, i) => (
+          <div key={i} className="hist-bar"
+               style={{
+                 height: `${(c / maxCount) * 100}%`,
+                 background: i >= threshBin ? 'var(--teal)' : 'var(--grey-3)',
+               }}
+               title={`${(min + i*width).toFixed(2)}-${(min + (i+1)*width).toFixed(2)}: ${c}`}
+          />
+        ))}
+      </div>
+      <div className="hist-labels">
+        <span>0.0</span>
+        <span>0.5</span>
+        <span>1.0</span>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// Pilot results panel
+// ============================================================
+function PilotPanel({ jobId, pilot, onConfirm }) {
+  const [nDesigns,    setNDesigns]    = useState(pilot.recommended_n_designs || 5000);
+  const [submitting,  setSubmitting]  = useState(false);
+
+  async function handleConfirm() {
+    setSubmitting(true);
+    try {
+      await fetch(`/api/jobs/${jobId}/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ n_designs: nDesigns }),
+      });
+      onConfirm();
+    } catch(e) {
+      setSubmitting(false);
+    }
+  }
+
+  const passColor = pilot.pass_rate_pct > 10 ? 'var(--green)'
+                  : pilot.pass_rate_pct > 3  ? 'var(--amber)'
+                  : 'var(--red)';
+
+  return (
+    <div className="pilot-panel">
+      <h2>Pilot results ready</h2>
+      <p className="pilot-sub">
+        {pilot.n_pilot} designs scored. Review the metrics below and confirm how many
+        designs to generate in the full run.
+      </p>
+
+      <div className="pilot-stats">
+        <div className="pilot-stat">
+          <div className="pilot-stat-value" style={{color: passColor}}>
+            {pilot.pass_rate_pct}%
+          </div>
+          <div className="pilot-stat-label">Pass rate</div>
+        </div>
+        <div className="pilot-stat">
+          <div className="pilot-stat-value">{pilot.n_passing}</div>
+          <div className="pilot-stat-label">Passing / {pilot.n_pilot}</div>
+        </div>
+        <div className="pilot-stat">
+          <div className="pilot-stat-value">{pilot.median_iptm?.toFixed(3)}</div>
+          <div className="pilot-stat-label">Median ipTM</div>
+        </div>
+        <div className="pilot-stat">
+          <div className="pilot-stat-value" style={{color:'var(--teal)'}}>
+            {pilot.best_iptm?.toFixed(3)}
+          </div>
+          <div className="pilot-stat-label">Best ipTM</div>
+        </div>
+      </div>
+
+      {pilot.iptm_values && (
+        <PilotHistogram
+          iptmValues={pilot.iptm_values}
+          threshold={pilot.thresholds?.iptm || 0.8}
+        />
+      )}
+
+      <div className="pilot-confirm">
+        <h4>Launch full run</h4>
+        <div className="confirm-row">
+          <label>n_designs</label>
+          <input className="input" type="number" value={nDesigns}
+                 onChange={e => setNDesigns(+e.target.value)} step={100} min={100} />
+          <span className="pilot-rec">
+            Recommended: {pilot.recommended_n_designs?.toLocaleString()}
+            {pilot.pass_rate > 0
+              ? ` (${pilot.pass_rate_pct}% pass rate → ~${Math.round(nDesigns * pilot.pass_rate)} passing)`
+              : ''}
+          </span>
+          <button className="btn-primary" onClick={handleConfirm}
+                  disabled={submitting}>
+            {submitting ? <><Spinner /> &nbsp;Submitting…</> : 'Launch full run →'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
 // STEP 3: Job status / pipeline progress
 // ============================================================
 const STAGE_LABELS = {
-  rfd3_generation:  'RFD3\nGeneration',
-  ligandmpnn:       'LigandMPNN\nSequence design',
-  rf3_scoring:      'RF3\nScoring',
-  post_processing:  'Analysis &\nRanking',
-  bindcraft_design: 'BindCraft\nDesign',
+  pilot_generation:      'Pilot\nGeneration',
+  pilot_rf3_scoring:     'Pilot\nRF3 Scoring',
+  awaiting_confirmation: 'Awaiting\nConfirmation',
+  rfd3_generation:       'RFD3\nGeneration',
+  ligandmpnn:            'LigandMPNN\nSequence design',
+  rf3_scoring:           'RF3\nScoring',
+  post_processing:       'Analysis &\nRanking',
+  bindcraft_design:      'BindCraft\nDesign',
 };
 
 function StatusPage({ jobId, onResults }) {
@@ -1594,6 +1916,14 @@ function StatusPage({ jobId, onResults }) {
           </div>
         </div>
       </div>
+
+      {job.status === 'awaiting_confirmation' && job.pilot_results && (
+        <PilotPanel
+          jobId={jobId}
+          pilot={job.pilot_results}
+          onConfirm={() => {/* polling will pick up the new status */}}
+        />
+      )}
 
       {job.status === 'failed' && job.error && (
         <div style={{background:'rgba(255,92,122,0.1)', border:'1px solid var(--red)',
