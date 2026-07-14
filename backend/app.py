@@ -155,7 +155,66 @@ def get_job(job_id):
         except Exception:
             pass
 
+    # Count designs generated so far by scanning workspace output dirs
+    job["designs_generated"] = _count_designs(job_id, job.get("status"))
+
     return jsonify(job)
+
+
+def _count_designs(job_id: str, status: str) -> dict:
+    """
+    Count designs at each stage by scanning output directories.
+    Returns dict with counts for each stage that has outputs.
+    """
+    import glob
+    job_dir = CFG.get("paths", {}).get("workspace", "/tmp/symplify")
+    job_dir = Path(job_dir) / job_id
+
+    counts = {}
+
+    # RFD3 backbones
+    rfd3_dir = job_dir / "rfd3_outputs"
+    if rfd3_dir.exists():
+        counts["rfd3_backbones"] = len(list(rfd3_dir.glob("*.json")))
+
+    # Full run RFD3 backbones
+    full_rfd3_dir = job_dir / "full_run" / "rfd3_outputs"
+    if full_rfd3_dir.exists():
+        counts["full_rfd3_backbones"] = len(list(full_rfd3_dir.glob("*.json")))
+
+    # MPNN sequences
+    mpnn_dir = job_dir / "mpnn_outputs"
+    if mpnn_dir.exists():
+        counts["mpnn_sequences"] = len(list(mpnn_dir.rglob("*.cif")))
+
+    # Full run MPNN
+    full_mpnn_dir = job_dir / "full_run" / "mpnn_outputs"
+    if full_mpnn_dir.exists():
+        counts["full_mpnn_sequences"] = len(list(full_mpnn_dir.rglob("*.cif")))
+
+    # Pilot RF3 scored
+    pilot_rf3 = job_dir / "pilot_rf3_outputs" / "pilot_rf3_results.json"
+    if pilot_rf3.exists():
+        try:
+            import json as _json
+            with open(pilot_rf3) as f:
+                data = _json.load(f)
+            counts["pilot_scored"] = len(data)
+        except Exception:
+            pass
+
+    # Full RF3 scored
+    full_rf3 = job_dir / "full_run" / "rf3_outputs" / "all_results.json"
+    if full_rf3.exists():
+        try:
+            import json as _json
+            with open(full_rf3) as f:
+                data = _json.load(f)
+            counts["full_scored"] = len(data)
+        except Exception:
+            pass
+
+    return counts
 
 
 @app.route("/api/jobs/<job_id>/results", methods=["GET"])
