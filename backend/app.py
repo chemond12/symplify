@@ -627,8 +627,57 @@ def serve_structure(filename):
     path = UPLOAD_DIR / safe
     if not path.exists():
         return jsonify({"error": "File not found"}), 404
+
+    # For CIF files, convert to SDF via RDKit SMILES for reliable 3D rendering
+    if str(safe).endswith(".cif"):
+        try:
+            sdf = _cif_to_sdf(str(path))
+            if sdf:
+                from flask import Response
+                return Response(sdf, mimetype="chemical/x-mdl-sdfile")
+        except Exception:
+            pass
+
     mimetype = "chemical/x-cif" if str(safe).endswith(".cif") else "chemical/x-pdb"
     return send_file(str(path), mimetype=mimetype, download_name=safe)
+
+
+def _cif_to_sdf(cif_path: str) -> str:
+    """Convert CCD CIF to SDF via RDKit for 3D visualization."""
+    import re
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+
+    with open(cif_path, errors='ignore') as f:
+        content = f.read()
+
+    # Extract SMILES
+    smiles = None
+    for line in content.split('\n'):
+        line = line.strip()
+        if 'SMILES_CANONICAL' in line and 'CACTVS' in line:
+            m = re.search(r'"([^"]{5,})"', line)
+            if m:
+                smiles = m.group(1)
+                break
+
+    if not smiles:
+        return None
+
+    mol = Chem.MolFromSmiles(smiles)
+    if not mol:
+        return None
+
+    # Generate 3D coordinates
+    mol = Chem.AddHs(mol)
+    result = AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+    if result != 0:
+        # Fallback to 2D
+        AllChem.Compute2DCoords(mol)
+    AllChem.MMFFOptimizeMolecule(mol)
+    mol = Chem.RemoveHs(mol)
+
+    return Chem.MolToMolBlock(mol)
 
 
 @app.route("/api/structure-with-hotspots", methods=["POST"])
