@@ -89,12 +89,22 @@ def create_job():
       - name: job name
       - config: JSON string of job parameters
     """
-    if "file" not in request.files:
+    # Check if file was pre-fetched from RCSB (path provided instead of upload)
+    if "file" not in request.files and "file_path" in request.form:
+        file_path = request.form.get("file_path")
+        if not Path(file_path).exists():
+            return jsonify({"error": "Pre-fetched file not found"}), 400
+        filename = Path(file_path).name
+    elif "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
+    else:
+        f           = request.files["file"]
+        filename    = secure_filename(f.filename)
+        file_path   = str(UPLOAD_DIR / filename)
+        f.save(file_path)
 
-    f           = request.files["file"]
     target_type = request.form.get("target_type", "protein")
-    name        = request.form.get("name", f.filename)
+    name        = request.form.get("name", filename)
     config_str  = request.form.get("config", "{}")
 
     try:
@@ -102,13 +112,8 @@ def create_job():
     except json.JSONDecodeError:
         return jsonify({"error": "Invalid config JSON"}), 400
 
-    # Save uploaded file
-    filename = secure_filename(f.filename)
-    upload_path = UPLOAD_DIR / filename
-    f.save(str(upload_path))
-
     # Create job in DB
-    job_id = db.create_job(name, target_type, str(upload_path), config)
+    job_id = db.create_job(name, target_type, file_path, config)
     db.init_stages(job_id, target_type)
 
     # Submit pipeline in background thread
@@ -492,6 +497,71 @@ def score_difficulty():
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
+
+
+@app.route("/api/fetch-pdb/<pdb_id>", methods=["GET"])
+def fetch_pdb(pdb_id):
+    """
+    Fetch a PDB structure from RCSB by 4-character ID.
+    Downloads the file, saves to uploads dir, and returns chain analysis.
+    """
+    import urllib.request
+    import urllib.error
+
+    pdb_id = pdb_id.upper().strip()
+    if len(pdb_id) != 4 or not pdb_id.isalnum():
+        return jsonify({"error": "Invalid PDB ID — must be 4 alphanumeric characters"}), 400
+
+    url      = f"https://files.rcsb.org/download/{pdb_id}.pdb"
+    out_path = UPLOAD_DIR / f"{pdb_id}.pdb"
+
+    try:
+        urllib.request.urlretrieve(url, str(out_path))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return jsonify({"error": f"PDB ID {pdb_id} not found in RCSB"}), 404
+        return jsonify({"error": f"Failed to fetch {pdb_id}: {e}"}), 502
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+    try:
+        analysis = _analyze_structure(str(out_path))
+        return jsonify({
+            **analysis,
+            "pdb_id":    pdb_id,
+            "filename":  f"{pdb_id}.pdb",
+            "file_path": str(out_path),
+            "file_size": out_path.stat().st_size,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/score-difficulty-by-path", methods=["POST"])
+def score_difficulty_by_path():
+    """Score difficulty for a file already on the server (pre-fetched from RCSB)."""
+    data        = request.get_json() or {}
+    file_path   = data.get("file_path")
+    target_type = data.get("target_type", "protein")
+
+    if not file_path or not Path(file_path).exists():
+        return jsonify({"error": "File not found"}), 400
+
+    try:
+        if target_type == "protein":
+            report = score_protein(file_path)
+        else:
+            report = score_small_molecule(file_path)
+
+        return jsonify({
+            "overall":             report.overall,
+            "grade":               report.grade,
+            "factors":             report.factors,
+            "recommended_designs": report.recommended_designs,
+            "warnings":            report.warnings,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/find-hotspots", methods=["POST"])
