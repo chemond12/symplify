@@ -1353,27 +1353,27 @@ function UploadPage({ onNext }) {
       setPdbFetching(false);
     }
   }
+
+  function handleFile(f) {
     if (!f) return;
     setFile(f);
     if (!jobName) setJobName(f.name.replace(/\.(pdb|cif|cif\.gz)$/i, ''));
     setAnalyzing(true);
     setChainInfo(null);
     setTargetType(null);
-    try {
-      const fd = new FormData();
-      fd.append('file', f);
-      const r = await fetch('/api/analyze-structure', { method: 'POST', body: fd });
-      const data = await r.json();
-      if (data.chains) {
-        setChainInfo(data);
-        setChain(data.suggested_chain);
-        setTargetType(data.suggested_type);
-      }
-    } catch(e) {
-      console.error('Structure analysis failed:', e);
-    } finally {
-      setAnalyzing(false);
-    }
+    const fd = new FormData();
+    fd.append('file', f);
+    fetch('/api/analyze-structure', { method: 'POST', body: fd })
+      .then(r => r.json())
+      .then(data => {
+        if (data.chains) {
+          setChainInfo(data);
+          setChain(data.suggested_chain);
+          setTargetType(data.suggested_type);
+        }
+      })
+      .catch(e => console.error('Structure analysis failed:', e))
+      .finally(() => setAnalyzing(false));
   }
 
   function addHotspot(e) {
