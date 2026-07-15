@@ -136,6 +136,15 @@ def hotspot_check(pdb_path, target_chain, hotspots, binder_chain, cutoff=5.0):
     cov = len(contacted) / len(hotspots) if hotspots else None
     return cov, contacted, missed
 
+def binder_footprint(pdb_path, target_chain, binder_chain, cutoff=5.0):
+    """All target-chain residues the binder contacts — the design's actual epitope."""
+    chains = _heavy_atoms(pdb_path)
+    if target_chain not in chains or binder_chain not in chains:
+        return []
+    binder = [a for res in chains[binder_chain].values() for a in res]
+    return sorted(r for r, atoms in chains[target_chain].items()
+                  if _contacts(atoms, binder, cutoff))
+
 
 # ---------------------------------------------------------------------------
 # Min ipAE via ColabFold/AF2
@@ -312,6 +321,7 @@ OUTPUT_FIELDS = [
     "interface_fraction", "interface_hydrophobicity", "n_interface_residues",
     "c_terminus_sasa", "c_terminus_distance", "c_terminus_score",
     "hotspot_coverage", "hotspot_ok", "hotspot_contacted", "hotspot_missed",
+    "landed_on",
     "helicity", "binder_score",
     "passes_filters", "filter_reason",
 ]
@@ -475,6 +485,7 @@ def main():
         row["hotspot_ok"] = ""
         row["hotspot_contacted"] = ""
         row["hotspot_missed"] = ""
+        row["landed_on"] = ""
     all_pdbs = [str(p) for p in pdb_map.values()]
     if all_pdbs:
         tchain, hotspots, note = load_hotspots(
@@ -492,6 +503,7 @@ def main():
             row["hotspot_ok"]        = "TRUE" if ok else "FALSE"
             row["hotspot_contacted"] = " ".join(map(str, contacted))
             row["hotspot_missed"]    = " ".join(map(str, missed))
+            row["landed_on"]         = " ".join(map(str, binder_footprint(str(pdb), tchain, args.binder_chain)))
         if hotspots:
             print(f"  {n_ok}/{len(passing_rows)} passing designs engage >=50% of hotspots.")
 
