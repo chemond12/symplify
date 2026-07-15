@@ -1256,7 +1256,12 @@ const API = {
   },
   async createJob(file, name, targetType, config) {
     const fd = new FormData();
-    fd.append('file', file);
+    if (file._path) {
+      // Pre-fetched from RCSB — pass server-side path instead of re-uploading
+      fd.append('file_path', file._path);
+    } else {
+      fd.append('file', file);
+    }
     fd.append('name', name);
     fd.append('target_type', targetType);
     fd.append('config', JSON.stringify(config));
@@ -1319,7 +1324,35 @@ function UploadPage({ onNext }) {
   const [hydrophob,   setHydrophob]   = useState(0.25);
   const [minIpae,     setMinIpae]     = useState(1.0);
 
-  async function handleFile(f) {
+  const [pdbIdInput, setPdbIdInput] = useState('');
+  const [pdbFetching, setPdbFetching] = useState(false);
+  const [pdbError,   setPdbError]   = useState('');
+
+  async function fetchPdbId() {
+    const id = pdbIdInput.trim().toUpperCase();
+    if (id.length !== 4) { setPdbError('Must be 4 characters'); return; }
+    setPdbFetching(true);
+    setPdbError('');
+    setChainInfo(null);
+    setTargetType(null);
+    try {
+      const r    = await fetch(`/api/fetch-pdb/${id}`);
+      const data = await r.json();
+      if (data.error) { setPdbError(data.error); return; }
+      // Simulate a File object for the rest of the flow
+      setFile({ name: data.filename, size: data.file_size, _path: data.file_path, _pdb_id: id });
+      if (!jobName) setJobName(id);
+      if (data.chains) {
+        setChainInfo(data);
+        setChain(data.suggested_chain);
+        setTargetType(data.suggested_type);
+      }
+    } catch(e) {
+      setPdbError('Failed to fetch from RCSB');
+    } finally {
+      setPdbFetching(false);
+    }
+  }
     if (!f) return;
     setFile(f);
     if (!jobName) setJobName(f.name.replace(/\.(pdb|cif|cif\.gz)$/i, ''));
@@ -1351,10 +1384,21 @@ function UploadPage({ onNext }) {
   }
 
   async function handleSubmit() {
-    if (!file) return;
+    if (!file || !targetType) return;
     setLoading(true);
     try {
-      const diff = await API.scoreTarget(file, targetType);
+      let diff;
+      if (file._path) {
+        // File already on server — score via path endpoint
+        const r = await fetch('/api/score-difficulty-by-path', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file_path: file._path, target_type: targetType }),
+        });
+        diff = await r.json();
+      } else {
+        diff = await API.scoreTarget(file, targetType);
+      }
       onNext({ file, jobName, targetType, chain, hotspots,
                linkerRep,
                nDesigns: nDesigns || (targetType === 'protein' ? 100 : null),
@@ -1383,6 +1427,25 @@ function UploadPage({ onNext }) {
       </p>
 
       <div className="upload-card">
+        {/* PDB ID fetch */}
+        <div className="field-group" style={{marginBottom:16}}>
+          <span className="field-label">Fetch from RCSB</span>
+          <div className="input-row">
+            <input className="input" placeholder="e.g. 1KDM"
+                   value={pdbIdInput} maxLength={4}
+                   style={{textTransform:'uppercase', letterSpacing:2, fontFamily:'var(--font-mono)'}}
+                   onChange={e => { setPdbIdInput(e.target.value.toUpperCase()); setPdbError(''); }}
+                   onKeyDown={e => e.key === 'Enter' && fetchPdbId()} />
+            <button className="btn-secondary" onClick={fetchPdbId}
+                    disabled={pdbFetching || pdbIdInput.length !== 4}
+                    style={{whiteSpace:'nowrap', padding:'10px 16px'}}>
+              {pdbFetching ? <Spinner /> : 'Fetch →'}
+            </button>
+          </div>
+          {pdbError && <div style={{fontSize:12, color:'var(--red)', marginTop:4}}>{pdbError}</div>}
+          <div className="hint">Or upload a file below</div>
+        </div>
+
         {/* File drop zone */}
         <div
           className={`upload-zone ${dragOver ? 'drag-over' : ''} ${file ? 'has-file' : ''}`}
