@@ -361,16 +361,24 @@ def _analyze_structure(pdb_path: str) -> dict:
         "SEC","PYL","HSD","HSE","HSP","MSE",
     }
 
-    chains    = {}   # chain_id -> {atom_residues, hetatm_residues}
+    path   = str(pdb_path)
+    chains = {}
 
-    # Handle CIF files via biotite if available, else try as PDB
-    path = str(pdb_path)
-    lines = []
-
+    # For CIF files, parse _atom_site loop directly
     if path.endswith((".cif", ".cif.gz")):
+        import gzip, re
+
+        if path.endswith(".gz"):
+            with gzip.open(path, 'rt', errors='ignore') as f:
+                content = f.read()
+        else:
+            with open(path, errors='ignore') as f:
+                content = f.read()
+
+        # Try biotite first
         try:
             import biotite.structure.io.pdbx as pdbx
-            import gzip, tempfile, shutil
+            import tempfile, shutil
             if path.endswith(".gz"):
                 with tempfile.NamedTemporaryFile(suffix=".cif", delete=False) as tmp:
                     with gzip.open(path, "rb") as gz:
@@ -381,7 +389,7 @@ def _analyze_structure(pdb_path: str) -> dict:
             cif_file = pdbx.CIFFile.read(tmp_cif)
             atom_arr = pdbx.get_structure(cif_file, model=1)
             for atom in atom_arr:
-                chain_id = atom.chain_id
+                chain_id = atom.chain_id or "A"
                 resname  = atom.res_name
                 hetero   = atom.hetero
                 if chain_id not in chains:
@@ -391,12 +399,53 @@ def _analyze_structure(pdb_path: str) -> dict:
                 elif not hetero:
                     chains[chain_id]["atom_res"].add(resname)
         except Exception:
-            # Fall through to PDB parsing
-            pass
+            # Manual CIF parsing — find atom_site block
+            # Look for _chem_comp.id to identify CCD ligand files
+            comp_match = re.search(r'_chem_comp\.id\s+(\S+)', content)
+            if comp_match:
+                # This is a CCD ligand file — treat as single small molecule
+                resname  = comp_match.group(1).strip('"\'')
+                n_atoms  = len(re.findall(r'^ATOM|^HETATM', content, re.MULTILINE))
+                # Count atoms from _atom_site loop
+                atom_matches = re.findall(r'\n\s*\S+\s+\S+\s+\S+\s+(\S+)\s+', content)
+                n_atoms = max(n_atoms, 10)  # fallback estimate
+                chains["A"] = {"atom_res": set(), "hetatm_res": {resname}}
+            else:
+                # Try parsing _atom_site columns manually
+                lines = content.split('\n')
+                in_atom_loop = False
+                col_map = {}
+                col_idx = 0
+                for line in lines:
+                    line = line.strip()
+                    if '_atom_site.' in line:
+                        in_atom_loop = True
+                        col_name = line.split('.')[-1].strip()
+                        col_map[col_name] = col_idx
+                        col_idx += 1
+                    elif in_atom_loop and line and not line.startswith('_') and not line.startswith('#'):
+                        parts = line.split()
+                        if len(parts) >= max(col_map.values(), default=0) + 1:
+                            try:
+                                chain_id = parts[col_map.get('auth_asym_id', col_map.get('label_asym_id', 0))]
+                                resname  = parts[col_map.get('label_comp_id', col_map.get('auth_comp_id', 1))]
+                                group    = parts[col_map.get('group_PDB', 0)] if 'group_PDB' in col_map else 'HETATM'
+                                if chain_id not in chains:
+                                    chains[chain_id] = {"atom_res": set(), "hetatm_res": set()}
+                                if group == 'ATOM':
+                                    chains[chain_id]["atom_res"].add(resname)
+                                elif resname not in waters:
+                                    chains[chain_id]["hetatm_res"].add(resname)
+                            except (IndexError, KeyError):
+                                pass
+                    elif in_atom_loop and line.startswith('#'):
+                        in_atom_loop = False
+                        col_idx = 0
+                        col_map = {}
 
+    # Parse as PDB
     if not chains:
-        # Parse as PDB
-        with open(path, errors="ignore") as f:
+        with open(path, errors='ignore') as f:
             for line in f:
                 rec = line[:6].strip()
                 if rec not in ("ATOM", "HETATM"):
@@ -419,47 +468,37 @@ def _analyze_structure(pdb_path: str) -> dict:
         atom_res   = chains[chain_id]["atom_res"]
         hetatm_res = chains[chain_id]["hetatm_res"]
         n_aa       = len(atom_res & std_aa)
-        n_hetatm   = len(hetatm_res)
 
         if n_aa >= 3:
-            # Has standard amino acids → protein
             chain_info.append({
                 "id":          chain_id,
                 "type":        "protein",
                 "n_residues":  len(atom_res),
-                "resnames":    sorted(list(atom_res))[:5],
                 "description": f"Chain {chain_id} — protein ({len(atom_res)} residue types)",
             })
-        elif n_hetatm > 0 and n_aa == 0:
-            # Only HETATM, no protein residues → small molecule
+        elif hetatm_res and n_aa == 0:
             resname = sorted(hetatm_res)[0]
             chain_info.append({
                 "id":          chain_id,
                 "type":        "small_molecule",
                 "resname":     resname,
-                "n_residues":  n_hetatm,
+                "n_residues":  len(hetatm_res),
                 "description": f"Chain {chain_id} — {resname} (small molecule)",
             })
-        elif n_hetatm > 0 and n_aa >= 1:
-            # Mixed — likely modified residues in a protein
+        elif hetatm_res and n_aa >= 1:
             chain_info.append({
                 "id":          chain_id,
                 "type":        "protein",
-                "n_residues":  len(atom_res) + n_hetatm,
-                "description": f"Chain {chain_id} — protein with ligand ({len(atom_res)} residues)",
+                "n_residues":  len(atom_res) + len(hetatm_res),
+                "description": f"Chain {chain_id} — protein with ligand",
             })
 
     if not chain_info:
         raise ValueError("Could not classify any chains")
 
-    # Suggest: prefer protein chain first, then small molecule
     proteins = [c for c in chain_info if c["type"] == "protein"]
     smols    = [c for c in chain_info if c["type"] == "small_molecule"]
-
-    if proteins:
-        suggested = proteins[0]
-    else:
-        suggested = smols[0]
+    suggested = proteins[0] if proteins else smols[0]
 
     return {
         "chains":          chain_info,
