@@ -620,6 +620,55 @@ def score_difficulty_by_path():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/structure/<path:filename>", methods=["GET"])
+def serve_structure(filename):
+    """Serve an uploaded structure file to the browser for 3D visualization."""
+    safe = secure_filename(filename)
+    path = UPLOAD_DIR / safe
+    if not path.exists():
+        return jsonify({"error": "File not found"}), 404
+    mimetype = "chemical/x-cif" if str(safe).endswith(".cif") else "chemical/x-pdb"
+    return send_file(str(path), mimetype=mimetype, download_name=safe)
+
+
+@app.route("/api/structure-with-hotspots", methods=["POST"])
+def structure_with_hotspots():
+    """
+    Return a PDB file with PESTO hotspot scores embedded in B-factor column.
+    Used by the 3D viewer to color residues by binding probability.
+    Expects JSON: {filename, chain, scores: {resid: score}}
+    """
+    data     = request.get_json() or {}
+    filename = secure_filename(data.get("filename", ""))
+    chain    = data.get("chain", "A")
+    scores   = data.get("scores", {})   # {"A47": 0.93, "A52": 0.84, ...}
+
+    path = UPLOAD_DIR / filename
+    if not path.exists():
+        return jsonify({"error": "File not found"}), 404
+
+    # Rewrite PDB with hotspot scores in B-factor column
+    output_lines = []
+    try:
+        with open(str(path), errors="ignore") as f:
+            for line in f:
+                if line.startswith(("ATOM", "HETATM")):
+                    rec_chain   = line[21].strip()
+                    res_num     = line[22:26].strip()
+                    res_id_str  = f"{rec_chain}{res_num}"
+                    score       = scores.get(res_id_str, 0.0)
+                    # Write score into B-factor field (cols 61-66)
+                    new_line = line[:60] + f"{score:6.2f}" + line[66:]
+                    output_lines.append(new_line)
+                else:
+                    output_lines.append(line)
+
+        from flask import Response
+        return Response("".join(output_lines), mimetype="chemical/x-pdb")
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/find-hotspots", methods=["POST"])
 def find_hotspots():
     """Identify hotspots/binding features for a target."""
