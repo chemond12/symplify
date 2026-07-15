@@ -1297,8 +1297,7 @@ function Toast({ msg, onClose }) {
 function UploadPage({ onNext }) {
   const [file,       setFile]       = useState(null);
   const [dragOver,   setDragOver]   = useState(false);
-  const [targetType, setTargetType] = useState('protein');
-  const [jobName,    setJobName]    = useState('');
+  const [targetType, setTargetType] = useState(null);
   const [chain,      setChain]      = useState('A');
   const [hotspots,   setHotspots]   = useState([]);
   const [hotInput,   setHotInput]   = useState('');
@@ -1307,6 +1306,9 @@ function UploadPage({ onNext }) {
   const [targetPass, setTargetPass] = useState(96);
   const [showAdv,    setShowAdv]    = useState(false);
   const [loading,    setLoading]    = useState(false);
+  const [analyzing,  setAnalyzing]  = useState(false);
+  const [chainInfo,  setChainInfo]  = useState(null);  // {chains, suggested_chain, suggested_type}
+  const [jobName,    setJobName]    = useState('');
   // Metric thresholds
   const [iptmThresh,  setIptmThresh]  = useState(0.8);
   const [ptmThresh,   setPtmThresh]   = useState(0.8);
@@ -1317,10 +1319,28 @@ function UploadPage({ onNext }) {
   const [hydrophob,   setHydrophob]   = useState(0.25);
   const [minIpae,     setMinIpae]     = useState(1.0);
 
-  function handleFile(f) {
+  async function handleFile(f) {
     if (!f) return;
     setFile(f);
     if (!jobName) setJobName(f.name.replace(/\.(pdb|cif|cif\.gz)$/i, ''));
+    setAnalyzing(true);
+    setChainInfo(null);
+    setTargetType(null);
+    try {
+      const fd = new FormData();
+      fd.append('file', f);
+      const r = await fetch('/api/analyze-structure', { method: 'POST', body: fd });
+      const data = await r.json();
+      if (data.chains) {
+        setChainInfo(data);
+        setChain(data.suggested_chain);
+        setTargetType(data.suggested_type);
+      }
+    } catch(e) {
+      console.error('Structure analysis failed:', e);
+    } finally {
+      setAnalyzing(false);
+    }
   }
 
   function addHotspot(e) {
@@ -1379,23 +1399,69 @@ function UploadPage({ onNext }) {
             {file ? `✓ ${file.name}` : 'Drop PDB or CIF file here'}
           </span>
           <span className="upload-hint">
-            {file ? `${(file.size/1024).toFixed(1)} KB` : 'or click to browse'}
+            {analyzing ? 'Analysing structure…' :
+             file ? `${(file.size/1024).toFixed(1)} KB` : 'or click to browse'}
           </span>
         </div>
 
-        {/* Target type */}
-        <div className="field-group">
-          <span className="field-label">Target type</span>
-          <div className="field-row">
-            {['protein','small_molecule'].map(t => (
-              <button key={t}
-                className={`type-btn ${targetType === t ? 'selected' : ''}`}
-                onClick={() => setTargetType(t)}>
-                {t === 'protein' ? '🧬 Protein' : '⚗️ Small molecule'}
-              </button>
-            ))}
+        {/* Auto-detected structure info */}
+        {analyzing && (
+          <div style={{display:'flex', alignItems:'center', gap:10, marginBottom:20,
+                       color:'var(--grey-2)', fontSize:13}}>
+            <Spinner /> Detecting chains and target type…
           </div>
-        </div>
+        )}
+
+        {chainInfo && !analyzing && (
+          <div className="field-group">
+            <span className="field-label">
+              Detected structure
+              <span style={{marginLeft:8, fontWeight:400, textTransform:'none',
+                            color:'var(--teal)', fontSize:11}}>
+                {chainInfo.n_chains} chain{chainInfo.n_chains !== 1 ? 's' : ''} found
+              </span>
+            </span>
+            <div className="field-row" style={{flexWrap:'wrap'}}>
+              {chainInfo.chains.map(c => (
+                <button key={c.id}
+                  className={`type-btn ${chain === c.id ? 'selected' : ''}`}
+                  style={{flex:'0 0 auto', minWidth:0}}
+                  onClick={() => { setChain(c.id); setTargetType(c.type); }}>
+                  <div style={{fontFamily:'var(--font-mono)', fontSize:13, fontWeight:600}}>
+                    Chain {c.id}
+                  </div>
+                  <div style={{fontSize:11, color: chain === c.id ? 'var(--teal)' : 'var(--grey-2)',
+                               marginTop:2}}>
+                    {c.type === 'protein' ? '🧬' : '⚗️'} {c.type === 'protein' ? 'Protein' : c.resname || 'Small mol'}
+                  </div>
+                </button>
+              ))}
+            </div>
+            {targetType && (
+              <div style={{fontSize:12, color:'var(--grey-2)', marginTop:6}}>
+                Will use <span style={{color:'var(--teal)'}}>
+                  {targetType === 'protein' ? 'BindCraft' : 'RFDiffusion3'}
+                </span> for chain {chain}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Manual target type override if no structure detected */}
+        {!chainInfo && !analyzing && (
+          <div className="field-group">
+            <span className="field-label">Target type</span>
+            <div className="field-row">
+              {['protein','small_molecule'].map(t => (
+                <button key={t}
+                  className={`type-btn ${targetType === t ? 'selected' : ''}`}
+                  onClick={() => setTargetType(t)}>
+                  {t === 'protein' ? '🧬 Protein' : '⚗️ Small molecule'}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Job name */}
         <div className="field-group">
@@ -1454,13 +1520,6 @@ function UploadPage({ onNext }) {
         {showAdv && (
           <div className="advanced-panel">
             <div className="advanced-grid">
-              {targetType === 'protein' && (
-                <div className="field-group" style={{marginBottom:0}}>
-                  <span className="field-label">Target chain</span>
-                  <input className="input" value={chain}
-                         onChange={e => setChain(e.target.value)} />
-                </div>
-              )}
               <div className="field-group" style={{marginBottom:0}}>
                 <span className="field-label">Target passing designs</span>
                 <input className="input" type="number" value={targetPass}
@@ -1502,8 +1561,10 @@ function UploadPage({ onNext }) {
         )}
 
         <button className="btn-primary" onClick={handleSubmit}
-                disabled={!file || !jobName || loading}>
-          {loading ? <><Spinner /> &nbsp;Analysing target…</> : 'Continue →'}
+                disabled={!file || !jobName || loading || analyzing || !targetType}>
+          {loading ? <><Spinner /> &nbsp;Analysing target…</> :
+           analyzing ? <><Spinner /> &nbsp;Reading structure…</> :
+           'Continue →'}
         </button>
       </div>
     </div>
