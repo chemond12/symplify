@@ -1720,38 +1720,47 @@ function HotspotViewer({ file, chain, targetType, scores }) {
         viewer.addModel(text, fmt);
 
         if (targetType === 'protein') {
+          // Base style: dark grey cartoon for whole chain
+          viewer.setStyle({chain}, { cartoon: { color: '#2A3F5A' } });
+
           if (hasScores) {
-            // Build residue-level score map: resnum -> score
-            const resScores = {};
-            Object.entries(scores).forEach(([k, v]) => {
-              const resnum = parseInt(k.slice(1));
-              if (!isNaN(resnum)) resScores[resnum] = v;
-            });
-
-            // Base style: grey cartoon for all
-            viewer.setStyle({chain}, {
-              cartoon: { color: '#3A506E' }
-            });
-
-            // Color hotspots by score bands
+            // Color by score bands — apply from lowest to highest so highest wins
             const bands = [
-              { min: 0.8, color: '#00C2B2' },  // teal — very high
-              { min: 0.6, color: '#4ECDC4' },  // lighter teal — high
-              { min: 0.4, color: '#F5A623' },  // amber — medium
+              { min: 0.3, max: 0.5, color: '#7E95B8' },  // light blue — low
+              { min: 0.5, max: 0.7, color: '#F5A623' },  // amber — medium
+              { min: 0.7, max: 0.85, color: '#4ECDC4' }, // light teal — high
+              { min: 0.85, max: 1.0, color: '#00C2B2' }, // bright teal — very high
             ];
-            bands.forEach(({ min, color }) => {
-              const resis = Object.entries(resScores)
-                .filter(([, s]) => s >= min)
-                .map(([r]) => parseInt(r));
+
+            bands.forEach(({ min, max, color }) => {
+              const resis = Object.entries(scores)
+                .filter(([k, v]) => k.startsWith(chain) && v >= min && v < max + 0.001)
+                .map(([k]) => parseInt(k.slice(chain.length)));
               if (resis.length > 0) {
-                viewer.setStyle({ chain, resi: resis }, {
-                  cartoon: { color },
-                  stick:   { radius: 0.12, color },
-                });
+                viewer.setStyle(
+                  { chain, resi: resis },
+                  { cartoon: { color }, stick: { radius: 0.1, color } }
+                );
               }
             });
-          } else {
-            viewer.setStyle({chain}, { cartoon: { color: '#7E95B8' } });
+
+            // Add labels for top hotspots
+            const topHots = Object.entries(scores)
+              .filter(([k, v]) => k.startsWith(chain) && v >= 0.85)
+              .sort(([,a],[,b]) => b - a)
+              .slice(0, 5);
+            topHots.forEach(([k, v]) => {
+              const resi = parseInt(k.slice(chain.length));
+              viewer.addLabel(`${k} (${v.toFixed(2)})`, {
+                position: { resi, chain },
+                fontSize: 10,
+                fontColor: '#00C2B2',
+                backgroundColor: 'rgba(11,22,40,0.8)',
+                borderColor: '#00C2B2',
+                borderThickness: 1,
+                inFront: true,
+              });
+            });
           }
         } else {
           // Small molecule — try stick + sphere
@@ -1801,10 +1810,16 @@ function HotspotViewer({ file, chain, targetType, scores }) {
       </div>
       {targetType === 'protein' && (
         <div className="viewer-legend">
-          <span><span className="legend-swatch" style={{background:'#3A506E'}} />No data</span>
-          <span><span className="legend-swatch" style={{background:'#F5A623'}} />Medium (0.4+)</span>
-          <span><span className="legend-swatch" style={{background:'#4ECDC4'}} />High (0.6+)</span>
-          <span><span className="legend-swatch" style={{background:'#00C2B2'}} />Very high (0.8+)</span>
+          {scores && Object.keys(scores).length > 0 ? (
+            <>
+              <span><span className="legend-swatch" style={{background:'#7E95B8'}} />Low (0.3+)</span>
+              <span><span className="legend-swatch" style={{background:'#F5A623'}} />Medium (0.5+)</span>
+              <span><span className="legend-swatch" style={{background:'#4ECDC4'}} />High (0.7+)</span>
+              <span><span className="legend-swatch" style={{background:'#00C2B2'}} />Very high (0.85+)</span>
+            </>
+          ) : (
+            <span style={{color:'var(--grey-3)'}}>Running PESTO hotspot analysis…</span>
+          )}
         </div>
       )}
     </div>
@@ -1820,7 +1835,6 @@ function DifficultyPage({ data, onBack, onSubmit }) {
   const [autoHots, setAutoHots]     = useState(null);
   const [loadingH, setLoadingH]     = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [blankOk,    setBlankOk]    = useState(false);
 
   useEffect(() => {
     if (hotspots.length === 0) {
@@ -1840,8 +1854,6 @@ function DifficultyPage({ data, onBack, onSubmit }) {
 
   const circumference = 2 * Math.PI * 48;
   const offset        = circumference * (1 - score / 100);
-  // PeSTo ran but found no interface — ask before proceeding with blank hotspots
-  const pestoNone = autoHots?.method === 'pesto_none' && hotspots.length === 0 && !blankOk;
 
   async function handleSubmit() {
     setSubmitting(true);
@@ -1933,10 +1945,11 @@ function DifficultyPage({ data, onBack, onSubmit }) {
       {/* 3D structure viewer */}
       {file && (
         <HotspotViewer
+          key={autoHots ? 'with-scores' : 'no-scores'}
           file={file}
           chain={data.chain}
           targetType={targetType}
-          scores={autoHots?.details?.scores || {}}
+          scores={autoHots?.details?.scores || null}
         />
       )}
 
@@ -1975,25 +1988,11 @@ function DifficultyPage({ data, onBack, onSubmit }) {
       {autoHots?.details?.note && (
         <div className="hint" style={{marginBottom:20}}>{autoHots.details.note}</div>
       )}
-      {pestoNone && (
-        <div className="warnings-box" style={{borderColor:'var(--amber)', marginBottom:20}}>
-          <h4>PeSTo found no hotspots</h4>
-          <p style={{fontSize:13, color:'var(--grey-2)', marginTop:4}}>
-            No protein-interface residues were found on this target. Leave the hotspot
-            field blank and let BindCraft auto-select the binding mode?
-          </p>
-          <div className="action-row" style={{marginTop:12}}>
-            <button className="btn-secondary" onClick={onBack}>No — add hotspots</button>
-            <button className="btn-primary" style={{width:'auto', padding:'10px 24px'}}
-                    onClick={() => setBlankOk(true)}>Yes — leave blank</button>
-          </div>
-        </div>
-      )}
 
       <div className="action-row">
         <button className="btn-secondary" onClick={onBack}>← Back</button>
         <button className="btn-primary" style={{width:'auto', padding:'12px 32px'}}
-                onClick={handleSubmit} disabled={submitting || pestoNone}>
+                onClick={handleSubmit} disabled={submitting}>
           {submitting ? <><Spinner /> &nbsp;Submitting…</> : 'Launch design run →'}
         </button>
       </div>
