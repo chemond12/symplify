@@ -18,7 +18,10 @@ DB_PATH = Path(__file__).resolve().parent.parent / "symplify.db"
 
 @contextmanager
 def get_db():
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False,
+                           timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.row_factory = sqlite3.Row
     try:
         yield conn
