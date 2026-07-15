@@ -1330,7 +1330,7 @@ function UploadPage({ onNext }) {
 
   async function fetchPdbId() {
     const id = pdbIdInput.trim().toUpperCase();
-    if (id.length !== 4) { setPdbError('Must be 4 characters'); return; }
+    if (id.length < 2 || id.length > 4) { setPdbError('Enter 2-4 characters'); return; }
     setPdbFetching(true);
     setPdbError('');
     setChainInfo(null);
