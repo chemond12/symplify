@@ -312,7 +312,156 @@ def confirm_job(job_id):
 # API: Pre-flight scoring
 # ---------------------------------------------------------------------------
 
-@app.route("/api/score-difficulty", methods=["POST"])
+@app.route("/api/analyze-structure", methods=["POST"])
+def analyze_structure():
+    """
+    Parse an uploaded PDB/CIF and return chain information.
+    Used by the UI to auto-detect target type and populate chain selector.
+
+    Returns:
+    {
+        chains: [
+            {id: "A", type: "protein", n_residues: 120, description: "Chain A — protein (120 residues)"},
+            {id: "B", type: "small_molecule", resname: "HCY", n_atoms: 26, description: "Chain B — HCY (small molecule)"},
+        ],
+        suggested_chain: "A",
+        suggested_type: "protein",
+        n_chains: 2,
+    }
+    """
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    f        = request.files["file"]
+    filename = secure_filename(f.filename)
+    tmp_path = UPLOAD_DIR / f"tmp_analyze_{filename}"
+    f.save(str(tmp_path))
+
+    try:
+        result = _analyze_structure(str(tmp_path))
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
+def _analyze_structure(pdb_path: str) -> dict:
+    """Parse PDB/CIF and return chain metadata."""
+    waters    = {"HOH", "WAT", "H2O", "DOD"}
+    std_aa    = {
+        "ALA","ARG","ASN","ASP","CYS","GLN","GLU","GLY","HIS","ILE",
+        "LEU","LYS","MET","PHE","PRO","SER","THR","TRP","TYR","VAL",
+        "SEC","PYL","HSD","HSE","HSP","MSE",
+    }
+
+    chains    = {}   # chain_id -> {atom_residues, hetatm_residues}
+
+    # Handle CIF files via biotite if available, else try as PDB
+    path = str(pdb_path)
+    lines = []
+
+    if path.endswith((".cif", ".cif.gz")):
+        try:
+            import biotite.structure.io.pdbx as pdbx
+            import gzip, tempfile, shutil
+            if path.endswith(".gz"):
+                with tempfile.NamedTemporaryFile(suffix=".cif", delete=False) as tmp:
+                    with gzip.open(path, "rb") as gz:
+                        shutil.copyfileobj(gz, tmp)
+                    tmp_cif = tmp.name
+            else:
+                tmp_cif = path
+            cif_file = pdbx.CIFFile.read(tmp_cif)
+            atom_arr = pdbx.get_structure(cif_file, model=1)
+            for atom in atom_arr:
+                chain_id = atom.chain_id
+                resname  = atom.res_name
+                hetero   = atom.hetero
+                if chain_id not in chains:
+                    chains[chain_id] = {"atom_res": set(), "hetatm_res": set()}
+                if hetero and resname not in waters:
+                    chains[chain_id]["hetatm_res"].add(resname)
+                elif not hetero:
+                    chains[chain_id]["atom_res"].add(resname)
+        except Exception:
+            # Fall through to PDB parsing
+            pass
+
+    if not chains:
+        # Parse as PDB
+        with open(path, errors="ignore") as f:
+            for line in f:
+                rec = line[:6].strip()
+                if rec not in ("ATOM", "HETATM"):
+                    continue
+                chain_id = line[21].strip() or "A"
+                resname  = line[17:20].strip()
+                if chain_id not in chains:
+                    chains[chain_id] = {"atom_res": set(), "hetatm_res": set()}
+                if rec == "HETATM" and resname not in waters:
+                    chains[chain_id]["hetatm_res"].add(resname)
+                elif rec == "ATOM":
+                    chains[chain_id]["atom_res"].add(resname)
+
+    if not chains:
+        raise ValueError("No ATOM or HETATM records found in file")
+
+    # Classify each chain
+    chain_info = []
+    for chain_id in sorted(chains.keys()):
+        atom_res   = chains[chain_id]["atom_res"]
+        hetatm_res = chains[chain_id]["hetatm_res"]
+        n_aa       = len(atom_res & std_aa)
+        n_hetatm   = len(hetatm_res)
+
+        if n_aa >= 3:
+            # Has standard amino acids → protein
+            chain_info.append({
+                "id":          chain_id,
+                "type":        "protein",
+                "n_residues":  len(atom_res),
+                "resnames":    sorted(list(atom_res))[:5],
+                "description": f"Chain {chain_id} — protein ({len(atom_res)} residue types)",
+            })
+        elif n_hetatm > 0 and n_aa == 0:
+            # Only HETATM, no protein residues → small molecule
+            resname = sorted(hetatm_res)[0]
+            chain_info.append({
+                "id":          chain_id,
+                "type":        "small_molecule",
+                "resname":     resname,
+                "n_residues":  n_hetatm,
+                "description": f"Chain {chain_id} — {resname} (small molecule)",
+            })
+        elif n_hetatm > 0 and n_aa >= 1:
+            # Mixed — likely modified residues in a protein
+            chain_info.append({
+                "id":          chain_id,
+                "type":        "protein",
+                "n_residues":  len(atom_res) + n_hetatm,
+                "description": f"Chain {chain_id} — protein with ligand ({len(atom_res)} residues)",
+            })
+
+    if not chain_info:
+        raise ValueError("Could not classify any chains")
+
+    # Suggest: prefer protein chain first, then small molecule
+    proteins = [c for c in chain_info if c["type"] == "protein"]
+    smols    = [c for c in chain_info if c["type"] == "small_molecule"]
+
+    if proteins:
+        suggested = proteins[0]
+    else:
+        suggested = smols[0]
+
+    return {
+        "chains":          chain_info,
+        "suggested_chain": suggested["id"],
+        "suggested_type":  suggested["type"],
+        "n_chains":        len(chain_info),
+    }
 def score_difficulty():
     """Score target difficulty without creating a job."""
     if "file" not in request.files:
