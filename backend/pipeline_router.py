@@ -186,8 +186,14 @@ def _detect_ligand_resnum(pdb_path: str) -> str:
             module_load = module,
         )
         jid1 = self.scheduler.submit(spec1)
-        db.update_stage(job_id, "pilot_generation", "running",
-                         scheduler_id=jid1)
+        print(f"[pipeline_router] Submitted pilot_gen job: {jid1}", flush=True)
+        try:
+            db.update_stage(job_id, "pilot_generation", "running",
+                             scheduler_id=str(jid1))
+            print(f"[pipeline_router] DB updated: pilot_generation running {jid1}", flush=True)
+        except Exception as e:
+            print(f"[pipeline_router] ERROR updating DB for pilot_generation: {e}", flush=True)
+            raise
 
         # Job 2: pilot RF3 scoring
         pilot_rf3_cmd = (
@@ -216,8 +222,14 @@ def _detect_ligand_resnum(pdb_path: str) -> str:
             module_load = module,
         )
         jid2 = self.scheduler.submit(spec2)
-        db.update_stage(job_id, "pilot_rf3_scoring", "pending",
-                         scheduler_id=jid2)
+        print(f"[pipeline_router] Submitted pilot_rf3 job: {jid2}", flush=True)
+        try:
+            db.update_stage(job_id, "pilot_rf3_scoring", "pending",
+                             scheduler_id=str(jid2))
+            print(f"[pipeline_router] DB updated: pilot_rf3_scoring pending {jid2}", flush=True)
+        except Exception as e:
+            print(f"[pipeline_router] ERROR updating DB for pilot_rf3_scoring: {e}", flush=True)
+            raise
 
     # -----------------------------------------------------------------------
     # RFD3 full run (Jobs 3 + 4 + 5) — called after user confirms
