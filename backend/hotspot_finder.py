@@ -94,11 +94,27 @@ def _run_pesto(pdb_path: str, chain: str, pesto_dir: str,
         Path(out_path).unlink(missing_ok=True)
 
         hotspots = data.get("hotspots", [])
-        if not hotspots:
-            return None
-
         scores = {r["res_id_str"]: r["score"]
                   for r in data.get("residues", [])}
+
+        if not hotspots:
+            # PeSTo ran fine but found NO interface residues above threshold
+            # (e.g. a target with no protein-protein interface, like PETase).
+            # Return a distinct result so the UI can ASK whether to leave hotspots
+            # blank (BindCraft auto-picks) instead of silently guessing with SASA.
+            return HotspotResult(
+                hotspots   = [],
+                method     = "pesto_none",
+                confidence = "none",
+                details    = {
+                    "scores":    scores,
+                    "threshold": data.get("threshold", 0.5),
+                    "prompt":    "leave_blank",
+                    "note": ("PeSTo found no protein-interface residues above threshold. "
+                             "Leave the hotspot field blank so BindCraft auto-selects "
+                             "the binding mode?"),
+                }
+            )
 
         return HotspotResult(
             hotspots   = hotspots,
