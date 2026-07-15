@@ -502,36 +502,53 @@ def score_difficulty():
 @app.route("/api/fetch-pdb/<pdb_id>", methods=["GET"])
 def fetch_pdb(pdb_id):
     """
-    Fetch a PDB structure from RCSB by 4-character ID.
-    Downloads the file, saves to uploads dir, and returns chain analysis.
+    Fetch a structure from RCSB by:
+      - 4-character PDB ID (e.g. 1KDM) → downloads full structure PDB
+      - 2-3 character CCD ligand code (e.g. 7V7, HCY) → downloads ideal ligand CIF
     """
     import urllib.request
     import urllib.error
 
     pdb_id = pdb_id.upper().strip()
-    if len(pdb_id) != 4 or not pdb_id.isalnum():
-        return jsonify({"error": "Invalid PDB ID — must be 4 alphanumeric characters"}), 400
+    if not pdb_id.isalnum() or len(pdb_id) > 4 or len(pdb_id) < 2:
+        return jsonify({"error": "Invalid ID — enter a 4-character PDB ID or 2-3 character CCD code"}), 400
 
-    url      = f"https://files.rcsb.org/download/{pdb_id}.pdb"
-    out_path = UPLOAD_DIR / f"{pdb_id}.pdb"
+    is_ligand = len(pdb_id) <= 3
+
+    if is_ligand:
+        url      = f"https://files.rcsb.org/ligands/download/{pdb_id}.cif"
+        filename = f"{pdb_id}.cif"
+    else:
+        url      = f"https://files.rcsb.org/download/{pdb_id}.pdb"
+        filename = f"{pdb_id}.pdb"
+
+    out_path = UPLOAD_DIR / filename
 
     try:
         urllib.request.urlretrieve(url, str(out_path))
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            return jsonify({"error": f"PDB ID {pdb_id} not found in RCSB"}), 404
+            label = "CCD ligand code" if is_ligand else "PDB ID"
+            return jsonify({"error": f"{label} {pdb_id} not found in RCSB"}), 404
         return jsonify({"error": f"Failed to fetch {pdb_id}: {e}"}), 502
     except Exception as e:
         return jsonify({"error": str(e)}), 502
 
     try:
         analysis = _analyze_structure(str(out_path))
+        # For CCD ligand CIFs, force type to small_molecule
+        if is_ligand:
+            for c in analysis.get("chains", []):
+                c["type"] = "small_molecule"
+            analysis["suggested_type"] = "small_molecule"
+
         return jsonify({
             **analysis,
             "pdb_id":    pdb_id,
-            "filename":  f"{pdb_id}.pdb",
+            "filename":  filename,
             "file_path": str(out_path),
             "file_size": out_path.stat().st_size,
+            "is_ligand": is_ligand,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
