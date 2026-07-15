@@ -136,6 +136,15 @@ def hotspot_check(pdb_path, target_chain, hotspots, binder_chain, cutoff=5.0):
     cov = len(contacted) / len(hotspots) if hotspots else None
     return cov, contacted, missed
 
+def binder_footprint(pdb_path, target_chain, binder_chain, cutoff=5.0):
+    """All target-chain residues the binder contacts — the design's actual epitope."""
+    chains = _heavy_atoms(pdb_path)
+    if target_chain not in chains or binder_chain not in chains:
+        return []
+    binder = [a for res in chains[binder_chain].values() for a in res]
+    return sorted(r for r, atoms in chains[target_chain].items()
+                  if _contacts(atoms, binder, cutoff))
+
 
 # ---------------------------------------------------------------------------
 # Min ipAE via ColabFold/AF2
@@ -312,6 +321,7 @@ OUTPUT_FIELDS = [
     "interface_fraction", "interface_hydrophobicity", "n_interface_residues",
     "c_terminus_sasa", "c_terminus_distance", "c_terminus_score",
     "hotspot_coverage", "hotspot_ok", "hotspot_contacted", "hotspot_missed",
+    "landed_on",
     "helicity", "binder_score",
     "passes_filters", "filter_reason",
 ]
@@ -407,12 +417,14 @@ def main():
     rows = [map_bindcraft_row(r) for r in raw_rows]
     print(f"  {len(rows)} designs found.")
 
-    # Find accepted PDBs
+    # Find accepted PDBs (key by full stem AND the CSV's model-stripped name)
     accepted_dir = bindcraft_dir / "Accepted"
+    pdb_files = sorted(accepted_dir.glob("*.pdb"))
     pdb_map = {}
-    for pdb in accepted_dir.glob("*.pdb"):
-        pdb_map[pdb.stem] = pdb
-    print(f"  {len(pdb_map)} accepted PDB files found.")
+    for pdb in pdb_files:
+        pdb_map[pdb.stem] = pdb                                 # e.g. ..._mpnn8_model1
+        pdb_map.setdefault(pdb.stem.rsplit("_model", 1)[0], pdb)  # e.g. ..._mpnn8  (CSV name)
+    print(f"  {len(pdb_files)} accepted PDB files found.")
 
     # ------------------------------------------------------------------
     # Step 2: Hard filters
@@ -473,6 +485,7 @@ def main():
         row["hotspot_ok"] = ""
         row["hotspot_contacted"] = ""
         row["hotspot_missed"] = ""
+        row["landed_on"] = ""
     all_pdbs = [str(p) for p in pdb_map.values()]
     if all_pdbs:
         tchain, hotspots, note = load_hotspots(
@@ -490,6 +503,7 @@ def main():
             row["hotspot_ok"]        = "TRUE" if ok else "FALSE"
             row["hotspot_contacted"] = " ".join(map(str, contacted))
             row["hotspot_missed"]    = " ".join(map(str, missed))
+            row["landed_on"]         = " ".join(map(str, binder_footprint(str(pdb), tchain, args.binder_chain)))
         if hotspots:
             print(f"  {n_ok}/{len(passing_rows)} passing designs engage >=50% of hotspots.")
 
