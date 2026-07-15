@@ -407,12 +407,14 @@ def main():
     rows = [map_bindcraft_row(r) for r in raw_rows]
     print(f"  {len(rows)} designs found.")
 
-    # Find accepted PDBs
+    # Find accepted PDBs (key by full stem AND the CSV's model-stripped name)
     accepted_dir = bindcraft_dir / "Accepted"
+    pdb_files = sorted(accepted_dir.glob("*.pdb"))
     pdb_map = {}
-    for pdb in accepted_dir.glob("*.pdb"):
-        pdb_map[pdb.stem] = pdb
-    print(f"  {len(pdb_map)} accepted PDB files found.")
+    for pdb in pdb_files:
+        pdb_map[pdb.stem] = pdb                                 # e.g. ..._mpnn8_model1
+        pdb_map.setdefault(pdb.stem.rsplit("_model", 1)[0], pdb)  # e.g. ..._mpnn8  (CSV name)
+    print(f"  {len(pdb_files)} accepted PDB files found.")
 
     # ------------------------------------------------------------------
     # Step 2: Hard filters
