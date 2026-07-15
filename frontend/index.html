@@ -1427,23 +1427,23 @@ function UploadPage({ onNext }) {
       </p>
 
       <div className="upload-card">
-        {/* PDB ID fetch */}
+        {/* PDB ID / CCD fetch */}
         <div className="field-group" style={{marginBottom:16}}>
           <span className="field-label">Fetch from RCSB</span>
           <div className="input-row">
-            <input className="input" placeholder="e.g. 1KDM"
+            <input className="input" placeholder="PDB ID (e.g. 1KDM) or ligand code (e.g. 7V7)"
                    value={pdbIdInput} maxLength={4}
                    style={{textTransform:'uppercase', letterSpacing:2, fontFamily:'var(--font-mono)'}}
                    onChange={e => { setPdbIdInput(e.target.value.toUpperCase()); setPdbError(''); }}
                    onKeyDown={e => e.key === 'Enter' && fetchPdbId()} />
             <button className="btn-secondary" onClick={fetchPdbId}
-                    disabled={pdbFetching || pdbIdInput.length !== 4}
+                    disabled={pdbFetching || pdbIdInput.length < 2}
                     style={{whiteSpace:'nowrap', padding:'10px 16px'}}>
               {pdbFetching ? <Spinner /> : 'Fetch →'}
             </button>
           </div>
           {pdbError && <div style={{fontSize:12, color:'var(--red)', marginTop:4}}>{pdbError}</div>}
-          <div className="hint">Or upload a file below</div>
+          <div className="hint">4-char PDB ID for proteins · 2-3 char CCD code for ligands (e.g. HCY, 7V7) · Or upload a file below</div>
         </div>
 
         {/* File drop zone */}
