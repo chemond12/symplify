@@ -38,6 +38,104 @@ sys.path.insert(0, str(CORE_DIR))
 from analyze_termini import analyze_termini, DEFAULT_SASA_THRESHOLD, DEFAULT_DISTANCE_THRESHOLD
 from append_linker import append_gs_linker
 
+# ---------------------------------------------------------------------------
+# Hotspot engagement check (auto-maps BindCraft's target renumbering)
+# ---------------------------------------------------------------------------
+
+def _ca_sequence(pdb_path, chain):
+    seq = {}
+    with open(pdb_path) as fh:
+        for line in fh:
+            if line.startswith("ATOM") and line[21] == chain and line[12:16].strip() == "CA":
+                try:
+                    seq[int(line[22:26])] = line[17:20].strip()
+                except ValueError:
+                    pass
+    return seq
+
+
+def _heavy_atoms(pdb_path):
+    chains = {}
+    with open(pdb_path) as fh:
+        for line in fh:
+            if not line.startswith(("ATOM", "HETATM")):
+                continue
+            if line[16] not in (" ", "A") or line[17:20].strip() in ("HOH", "WAT"):
+                continue
+            elem, aname = line[76:78].strip(), line[12:16].strip()
+            if elem == "H" or (not elem and aname.startswith("H")):
+                continue
+            try:
+                rs = int(line[22:26])
+                xyz = (float(line[30:38]), float(line[38:46]), float(line[46:54]))
+            except ValueError:
+                continue
+            chains.setdefault(line[21], {}).setdefault(rs, []).append(xyz)
+    return chains
+
+
+def _find_offset(in_seq, out_seq):
+    from collections import Counter
+    votes = Counter()
+    for r, aa in in_seq.items():
+        for k in range(-500, 501):
+            if out_seq.get(r + k) == aa:
+                votes[k] += 1
+    return votes.most_common(1)[0] if votes else (0, 0)
+
+
+def _contacts(res_atoms, other_atoms, cutoff):
+    c2 = cutoff * cutoff
+    for x1, y1, z1 in res_atoms:
+        for x2, y2, z2 in other_atoms:
+            dx, dy, dz = x1 - x2, y1 - y2, z1 - z2
+            if -cutoff < dx < cutoff and dx * dx + dy * dy + dz * dz <= c2:
+                return True
+    return False
+
+
+def load_hotspots(bindcraft_dir, target_pdb, design_pdbs, binder_chain, cutoff=5.0):
+    """Read hotspots from bc_settings.json, auto-map to the output numbering."""
+    settings = Path(bindcraft_dir) / "bc_settings.json"
+    hot_str, in_chain = "", None
+    if settings.exists():
+        try:
+            data = json.loads(settings.read_text())
+            hot_str = (data.get("hotspot_res") or data.get("target_hotspot_residues") or "").strip()
+            in_chain = data.get("chain")
+        except Exception:
+            pass
+    if not hot_str:
+        return None, set(), "no hotspots specified (auto-mode) — skipping hotspot check"
+    in_nums = sorted({int("".join(c for c in tok if c.isdigit()))
+                      for tok in hot_str.replace(" ", "").split(",") if any(ch.isdigit() for ch in tok)})
+    sample = _heavy_atoms(design_pdbs[0])
+    target_chain = next((c for c in sample if c != binder_chain), None)
+    if target_chain is None:
+        return None, set(), "could not identify target chain in design PDBs"
+    note = f"hotspots {in_nums} (chain {in_chain or '?'})"
+    if target_pdb and os.path.exists(target_pdb) and in_chain:
+        in_seq, out_seq = _ca_sequence(target_pdb, in_chain), _ca_sequence(design_pdbs[0], target_chain)
+        if in_seq and out_seq:
+            k, matches = _find_offset(in_seq, out_seq)
+            mapped = {n + k for n in in_nums}
+            note += f" -> {target_chain}{sorted(mapped)}  (offset {k:+d}, {matches}/{len(in_seq)} match)"
+            return target_chain, mapped, note
+    return target_chain, set(in_nums), note + " (no numbering map applied)"
+
+
+def hotspot_check(pdb_path, target_chain, hotspots, binder_chain, cutoff=5.0):
+    chains = _heavy_atoms(pdb_path)
+    if target_chain not in chains or binder_chain not in chains:
+        return None, [], sorted(hotspots)
+    binder = [a for res in chains[binder_chain].values() for a in res]
+    contacted, missed = [], []
+    for res in sorted(hotspots):
+        atoms = chains[target_chain].get(res)
+        (contacted if atoms and _contacts(atoms, binder, cutoff) else missed).append(res)
+    cov = len(contacted) / len(hotspots) if hotspots else None
+    return cov, contacted, missed
+
 
 # ---------------------------------------------------------------------------
 # Min ipAE via ColabFold/AF2
@@ -213,6 +311,7 @@ OUTPUT_FIELDS = [
     "interface_hbonds", "delta_unsat_hbonds",
     "interface_fraction", "interface_hydrophobicity", "n_interface_residues",
     "c_terminus_sasa", "c_terminus_distance", "c_terminus_score",
+    "hotspot_coverage", "hotspot_ok", "hotspot_contacted", "hotspot_missed",
     "helicity", "binder_score",
     "passes_filters", "filter_reason",
 ]
@@ -364,6 +463,35 @@ def main():
             row["c_terminus_score"]    = report.c_terminus.score
         except Exception as e:
             print(f"  [WARN] Terminus analysis failed for {row['design']}: {e}")
+
+    # ------------------------------------------------------------------
+    # Step 4b: Hotspot engagement (auto-maps BindCraft's target renumbering)
+    # ------------------------------------------------------------------
+    print(f"\n[Step 4b] Checking hotspot engagement...")
+    for row in rows:
+        row["hotspot_coverage"] = None
+        row["hotspot_ok"] = ""
+        row["hotspot_contacted"] = ""
+        row["hotspot_missed"] = ""
+    all_pdbs = [str(p) for p in pdb_map.values()]
+    if all_pdbs:
+        tchain, hotspots, note = load_hotspots(
+            str(bindcraft_dir), args.target_pdb, all_pdbs, args.binder_chain)
+        print(f"  {note}")
+        n_ok = 0
+        for row in passing_rows:
+            pdb = pdb_map.get(row["design"])
+            if not pdb or not hotspots:
+                continue
+            cov, contacted, missed = hotspot_check(str(pdb), tchain, hotspots, args.binder_chain)
+            ok = cov is not None and cov >= 0.5
+            n_ok += ok
+            row["hotspot_coverage"]  = round(cov, 3) if cov is not None else None
+            row["hotspot_ok"]        = "TRUE" if ok else "FALSE"
+            row["hotspot_contacted"] = " ".join(map(str, contacted))
+            row["hotspot_missed"]    = " ".join(map(str, missed))
+        if hotspots:
+            print(f"  {n_ok}/{len(passing_rows)} passing designs engage >=50% of hotspots.")
 
     # ------------------------------------------------------------------
     # Step 5: Rank and write CSV
