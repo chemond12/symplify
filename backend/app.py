@@ -120,7 +120,7 @@ def create_job():
     def run():
         try:
             db.update_job_status(job_id, "running")
-            router.submit(job_id, target_type, str(upload_path), config)
+            router.submit(job_id, target_type, str(file_path), config)
         except Exception as e:
             db.update_job_status(job_id, "failed", str(e))
 
