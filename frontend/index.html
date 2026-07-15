@@ -1695,11 +1695,7 @@ function HotspotViewer({ file, chain, targetType, scores }) {
 
   useEffect(() => {
     if (!viewerRef.current || !window.$3Dmol) return;
-
-    // Clean up previous viewer
-    if (glRef.current) {
-      try { glRef.current.clear(); } catch(e) {}
-    }
+    if (glRef.current) { try { glRef.current.clear(); } catch(e) {} }
 
     const viewer = window.$3Dmol.createViewer(viewerRef.current, {
       backgroundColor: '#0B1628',
@@ -1707,82 +1703,86 @@ function HotspotViewer({ file, chain, targetType, scores }) {
     });
     glRef.current = viewer;
 
+    const filename = file.name || file.filename || '';
+    const hasScores = scores && Object.keys(scores).length > 0;
+
     async function loadStructure() {
       try {
-        let pdbData;
-        if (scores && Object.keys(scores).length > 0 && targetType === 'protein') {
-          // Fetch structure with hotspot scores in B-factor column
-          const r = await fetch('/api/structure-with-hotspots', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              filename: file.name || file.filename,
-              chain,
-              scores,
-            }),
-          });
-          pdbData = await r.text();
-        } else {
-          // Fetch raw structure
-          const r = await fetch(`/api/structure/${file.name || file.filename}`);
-          pdbData = await r.text();
-        }
+        // Always fetch as raw structure first
+        const r = await fetch(`/api/structure/${filename}`);
+        if (!r.ok) throw new Error('Failed to fetch structure');
+        const text = await r.text();
 
-        viewer.addModel(pdbData, 'pdb');
+        // Detect format — CIF files get converted to SDF by backend
+        const isCif = filename.endsWith('.cif') || filename.endsWith('.cif.gz');
+        const fmt   = isCif ? 'sdf' : 'pdb';
 
-        if (targetType === 'protein' && scores && Object.keys(scores).length > 0) {
-          // Color by B-factor (hotspot score)
-          viewer.setStyle({chain}, {
-            cartoon: {
-              colorscheme: {
-                prop: 'b',
-                gradient: 'rwb',
-                min: 0,
-                max: 1,
+        viewer.addModel(text, fmt);
+
+        if (targetType === 'protein') {
+          if (hasScores) {
+            // Build residue-level score map: resnum -> score
+            const resScores = {};
+            Object.entries(scores).forEach(([k, v]) => {
+              const resnum = parseInt(k.slice(1));
+              if (!isNaN(resnum)) resScores[resnum] = v;
+            });
+
+            // Base style: grey cartoon for all
+            viewer.setStyle({chain}, {
+              cartoon: { color: '#3A506E' }
+            });
+
+            // Color hotspots by score bands
+            const bands = [
+              { min: 0.8, color: '#00C2B2' },  // teal — very high
+              { min: 0.6, color: '#4ECDC4' },  // lighter teal — high
+              { min: 0.4, color: '#F5A623' },  // amber — medium
+            ];
+            bands.forEach(({ min, color }) => {
+              const resis = Object.entries(resScores)
+                .filter(([, s]) => s >= min)
+                .map(([r]) => parseInt(r));
+              if (resis.length > 0) {
+                viewer.setStyle({ chain, resi: resis }, {
+                  cartoon: { color },
+                  stick:   { radius: 0.12, color },
+                });
               }
-            }
-          });
-          // Highlight high-scoring residues as spheres
-          const highScoreResidues = Object.entries(scores)
-            .filter(([, s]) => s > 0.6)
-            .map(([r]) => parseInt(r.slice(1)));
-          if (highScoreResidues.length > 0) {
-            viewer.setStyle(
-              { chain, resi: highScoreResidues },
-              {
-                cartoon: { color: '#00C2B2' },
-                stick:   { radius: 0.15, color: '#00C2B2' },
-              }
-            );
+            });
+          } else {
+            viewer.setStyle({chain}, { cartoon: { color: '#7E95B8' } });
           }
-        } else if (targetType === 'small_molecule') {
-          // Show small molecule as sticks colored by element
-          viewer.setStyle({}, { stick: { colorscheme: 'Jmol', radius: 0.2 } });
-          viewer.setStyle({}, { sphere: { colorscheme: 'Jmol', radius: 0.3 } });
         } else {
-          viewer.setStyle({chain}, { cartoon: { color: '#7E95B8' } });
+          // Small molecule — try stick + sphere
+          viewer.setStyle({}, {
+            stick:  { colorscheme: 'Jmol', radius: 0.15 },
+            sphere: { colorscheme: 'Jmol', radius: 0.4  },
+          });
         }
 
         viewer.zoomTo();
         viewer.render();
         setLoading(false);
       } catch(e) {
+        console.error('Viewer error:', e);
         setError('Could not load structure');
         setLoading(false);
       }
     }
 
     loadStructure();
-
-    return () => {
-      try { viewer.clear(); } catch(e) {}
-    };
+    return () => { try { viewer.clear(); } catch(e) {} };
   }, [file, chain, scores]);
 
   return (
     <div className="hotspot-viewer">
       <div className="hotspot-viewer-header">
-        <h4>Structure preview {scores && Object.keys(scores).length > 0 ? '— colored by binding probability' : ''}</h4>
+        <h4>
+          {targetType === 'protein'
+            ? 'Structure — colored by binding probability'
+            : 'Ligand structure'}
+        </h4>
         <span style={{fontSize:10, color:'var(--grey-3)'}}>Drag to rotate · Scroll to zoom</span>
       </div>
       <div className="viewer-3d" ref={viewerRef}>
@@ -1799,11 +1799,12 @@ function HotspotViewer({ file, chain, targetType, scores }) {
           </div>
         )}
       </div>
-      {targetType === 'protein' && scores && Object.keys(scores).length > 0 && (
+      {targetType === 'protein' && (
         <div className="viewer-legend">
-          <span><span className="legend-swatch" style={{background:'#2B59C3'}} />Low probability</span>
-          <span><span className="legend-swatch" style={{background:'#D1D1D1'}} />Medium</span>
-          <span><span className="legend-swatch" style={{background:'#00C2B2'}} />High probability hotspot</span>
+          <span><span className="legend-swatch" style={{background:'#3A506E'}} />No data</span>
+          <span><span className="legend-swatch" style={{background:'#F5A623'}} />Medium (0.4+)</span>
+          <span><span className="legend-swatch" style={{background:'#4ECDC4'}} />High (0.6+)</span>
+          <span><span className="legend-swatch" style={{background:'#00C2B2'}} />Very high (0.8+)</span>
         </div>
       )}
     </div>
