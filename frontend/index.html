@@ -1297,6 +1297,19 @@ const API = {
     return r.json();
   },
   async findHotspots(file, targetType, chain) {
+    // If file was pre-fetched from RCSB, use path-based endpoint
+    if (file._path) {
+      const r = await fetch('/api/find-hotspots', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          file_path: file._path,
+          target_type: targetType,
+          chain: chain || 'A',
+        }),
+      });
+      return r.json();
+    }
     const fd = new FormData();
     fd.append('file', file);
     fd.append('target_type', targetType);
@@ -1710,9 +1723,10 @@ function HotspotViewer({ file, chain, targetType, scores }) {
     if (glRef.current) { try { glRef.current.clear(); } catch(e) {} }
 
     const viewer = window.$3Dmol.createViewer(el, {
-      backgroundColor: '0x0B1628',
+      backgroundColor: 0x0B1628,
       antialias: true,
-      id: `viewer-${Date.now()}`,
+      width:  el.offsetWidth  || 600,
+      height: el.offsetHeight || 280,
     });
     glRef.current = viewer;
 
@@ -1734,12 +1748,11 @@ function HotspotViewer({ file, chain, targetType, scores }) {
           return;
         }
 
-        // Detect format — CIF files get converted to SDF by backend
+        // Detect format
         const isCif = filename.endsWith('.cif') || filename.endsWith('.cif.gz');
-        const fmt   = isCif ? 'mol' : 'pdb';
+        const fmt   = isCif ? 'sdf' : 'pdb';
 
         viewer.addModel(text, fmt);
-        viewer.setStyle({}, {});  // clear defaults
 
         if (targetType === 'protein') {
           // Base style: dark grey cartoon for whole chain
@@ -1817,7 +1830,9 @@ function HotspotViewer({ file, chain, targetType, scores }) {
         </h4>
         <span style={{fontSize:10, color:'var(--grey-3)'}}>Drag to rotate · Scroll to zoom</span>
       </div>
-      <div className="viewer-3d" ref={viewerRef}>
+      <div className="viewer-3d"
+           ref={viewerRef}
+           style={{width:'100%', height:'280px', position:'relative', overflow:'hidden'}}>
         {loading && (
           <div style={{position:'absolute', inset:0, display:'flex', alignItems:'center',
                        justifyContent:'center', color:'var(--grey-2)', fontSize:12, gap:8}}>
