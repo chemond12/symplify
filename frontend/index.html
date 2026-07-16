@@ -1701,171 +1701,103 @@ function UploadPage({ onNext }) {
 // Hotspot 3D viewer
 // ============================================================
 function HotspotViewer({ file, chain, targetType, scores }) {
-  const viewerRef = useRef(null);
-  const glRef     = useRef(null);
-  const [loading, setLoading] = useState(true);
-  const [error,   setError]   = useState(null);
+  const containerRef = useRef(null);
+  const viewerRef    = useRef(null);
+  const [status, setStatus] = useState('loading');
+  const [error,  setError]  = useState(null);
 
   useEffect(() => {
-    if (!viewerRef.current) return;
-    if (!window.$3Dmol) {
-      setError('3Dmol.js not loaded');
-      setLoading(false);
+    const container = containerRef.current;
+    if (!container || !window.$3Dmol) {
+      setError('3Dmol not available');
+      setStatus('error');
       return;
     }
 
-    const el = viewerRef.current;
-    let initialized = false;
-    let obs = null;
+    const filename   = (file && (file.name || file.filename)) || '';
+    const hasScores  = scores && Object.keys(scores).length > 0;
+    const isCif      = filename.endsWith('.cif');
+    const fmt        = isCif ? 'sdf' : 'pdb';
 
-    // Set explicit dimensions on element BEFORE creating viewer
-    el.style.width    = '100%';
-    el.style.height   = '280px';
-    el.style.display  = 'block';
+    // Create a plain div with hardcoded pixel dimensions for 3Dmol
+    const divEl = document.createElement('div');
+    divEl.style.width    = '600px';
+    divEl.style.height   = '280px';
+    divEl.style.position = 'relative';
+    container.appendChild(divEl);
 
-    function initViewer() {
-      if (initialized) return;
-      // Force a layout reflow to get real dimensions
-      const w = el.offsetWidth || el.parentElement?.offsetWidth || 600;
-      const h = 280;
-      if (w < 10) return;
+    const viewer = window.$3Dmol.createViewer(divEl, {
+      backgroundColor: 0x0B1628,
+      antialias: true,
+    });
+    viewerRef.current = viewer;
 
-      initialized = true;
-      if (obs) obs.disconnect();
-
-      if (glRef.current) { try { glRef.current.clear(); } catch(e) {} }
-
-      const viewer = window.$3Dmol.createViewer(el, {
-        backgroundColor: 0x0B1628,
-        antialias: true,
-        width:  w,
-        height: h,
-      });
-      glRef.current = viewer;
-
-    const filename = file.name || file.filename || '';
-    const hasScores = scores && Object.keys(scores).length > 0;
-
-    async function loadStructure() {
-      try {
-        const r = await fetch(`/api/structure/${filename}`);
-        if (!r.ok) {
-          setError(`Structure not found (${r.status})`);
-          setLoading(false);
-          return;
-        }
-        const text = await r.text();
-        if (!text || text.trim().length < 10) {
-          setError('Empty structure file');
-          setLoading(false);
-          return;
-        }
-
-        // Detect format
-        const isCif = filename.endsWith('.cif') || filename.endsWith('.cif.gz');
-        const fmt   = isCif ? 'sdf' : 'pdb';
-
+    fetch(`/api/structure/${filename}`)
+      .then(r => { if (!r.ok) throw new Error(r.status); return r.text(); })
+      .then(text => {
         viewer.addModel(text, fmt);
 
         if (targetType === 'protein') {
-          // Base style: dark grey cartoon for whole chain
           viewer.setStyle({chain}, { cartoon: { color: '#2A3F5A' } });
-
           if (hasScores) {
-            // Color by score bands — apply from lowest to highest so highest wins
             const bands = [
-              { min: 0.3, max: 0.5, color: '#7E95B8' },  // light blue — low
-              { min: 0.5, max: 0.7, color: '#F5A623' },  // amber — medium
-              { min: 0.7, max: 0.85, color: '#4ECDC4' }, // light teal — high
-              { min: 0.85, max: 1.0, color: '#00C2B2' }, // bright teal — very high
+              { min: 0.3, max: 0.5, color: '#7E95B8' },
+              { min: 0.5, max: 0.7, color: '#F5A623' },
+              { min: 0.7, max: 0.85, color: '#4ECDC4' },
+              { min: 0.85, max: 2.0, color: '#00C2B2' },
             ];
-
             bands.forEach(({ min, max, color }) => {
               const resis = Object.entries(scores)
-                .filter(([k, v]) => k.startsWith(chain) && v >= min && v < max + 0.001)
+                .filter(([k, v]) => k.startsWith(chain) && v >= min && v < max)
                 .map(([k]) => parseInt(k.slice(chain.length)));
-              if (resis.length > 0) {
-                viewer.setStyle(
-                  { chain, resi: resis },
-                  { cartoon: { color }, stick: { radius: 0.1, color } }
-                );
-              }
-            });
-
-            // Add labels for top hotspots
-            const topHots = Object.entries(scores)
-              .filter(([k, v]) => k.startsWith(chain) && v >= 0.85)
-              .sort(([,a],[,b]) => b - a)
-              .slice(0, 5);
-            topHots.forEach(([k, v]) => {
-              const resi = parseInt(k.slice(chain.length));
-              viewer.addLabel(`${k} (${v.toFixed(2)})`, {
-                position: { resi, chain },
-                fontSize: 10,
-                fontColor: '#00C2B2',
-                backgroundColor: 'rgba(11,22,40,0.8)',
-                borderColor: '#00C2B2',
-                borderThickness: 1,
-                inFront: true,
-              });
+              if (resis.length > 0)
+                viewer.setStyle({ chain, resi: resis }, { cartoon: { color }, stick: { radius: 0.1, color } });
             });
           }
         } else {
-          // Small molecule — try stick + sphere
-          viewer.setStyle({}, {
-            stick:  { colorscheme: 'Jmol', radius: 0.15 },
-            sphere: { colorscheme: 'Jmol', radius: 0.4  },
-          });
+          viewer.setStyle({}, { stick: { colorscheme: 'Jmol', radius: 0.15 },
+                                sphere: { colorscheme: 'Jmol', radius: 0.35 } });
         }
 
         viewer.zoomTo();
-        viewer.resize();
         viewer.render();
-        setLoading(false);
-      } catch(e) {
-        console.error('Viewer error:', e);
-        setError('Could not load structure');
-        setLoading(false);
-      }
-    }
-
-      loadStructure();
-    } // end initViewer
-
-    // Use ResizeObserver to detect when div has real dimensions
-    if (window.ResizeObserver) {
-      obs = new ResizeObserver(() => initViewer());
-      obs.observe(el);
-    }
-    // Also try immediately in case div is already sized
-    initViewer();
+        // Scale canvas to fill container
+        const canvas = divEl.querySelector('canvas');
+        if (canvas) {
+          canvas.style.width  = '100%';
+          canvas.style.height = '100%';
+        }
+        setStatus('ready');
+      })
+      .catch(e => {
+        setError(`Could not load structure: ${e.message}`);
+        setStatus('error');
+      });
 
     return () => {
-      if (obs) obs.disconnect();
-      try { if (glRef.current) glRef.current.clear(); } catch(e) {}
+      try { viewer.clear(); } catch(e) {}
+      if (container.contains(divEl)) container.removeChild(divEl);
     };
   }, [file, chain, scores]);
 
   return (
     <div className="hotspot-viewer">
       <div className="hotspot-viewer-header">
-        <h4>
-          {targetType === 'protein'
-            ? 'Structure — colored by binding probability'
-            : 'Ligand structure'}
-        </h4>
+        <h4>{targetType === 'protein' ? 'Structure — colored by binding probability' : 'Ligand structure'}</h4>
         <span style={{fontSize:10, color:'var(--grey-3)'}}>Drag to rotate · Scroll to zoom</span>
       </div>
-      <div className="viewer-3d"
-           ref={viewerRef}
-           style={{width:'100%', height:'280px', position:'relative', overflow:'hidden'}}>
-        {loading && (
+      <div ref={containerRef}
+           style={{width:'100%', height:'280px', position:'relative', overflow:'hidden',
+                   background:'#0B1628'}}>
+        {status === 'loading' && (
           <div style={{position:'absolute', inset:0, display:'flex', alignItems:'center',
                        justifyContent:'center', color:'var(--grey-2)', fontSize:12, gap:8}}>
-            <Spinner /> Loading structure…
+            <span style={{width:16,height:16,border:'2px solid var(--grey-3)',borderTopColor:'var(--teal)',
+                          borderRadius:'50%',animation:'spin 0.7s linear infinite',display:'inline-block'}} />
+            Loading structure…
           </div>
         )}
-        {error && (
+        {status === 'error' && (
           <div style={{position:'absolute', inset:0, display:'flex', alignItems:'center',
                        justifyContent:'center', color:'var(--grey-3)', fontSize:12}}>
             {error}
@@ -1882,7 +1814,7 @@ function HotspotViewer({ file, chain, targetType, scores }) {
               <span><span className="legend-swatch" style={{background:'#00C2B2'}} />Very high (0.85+)</span>
             </>
           ) : (
-            <span style={{color:'var(--grey-3)'}}>Running PESTO hotspot analysis…</span>
+            <span style={{color:'var(--grey-3)'}}>Running hotspot analysis…</span>
           )}
         </div>
       )}
