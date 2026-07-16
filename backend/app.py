@@ -676,8 +676,8 @@ def _cif_to_sdf(cif_path: str) -> str:
         AllChem.Compute2DCoords(mol)
     AllChem.MMFFOptimizeMolecule(mol)
     mol = Chem.RemoveHs(mol)
-
-    return Chem.MolToMolBlock(mol)
+    # 3Dmol requires $$$$ terminator for SDF format
+    return Chem.MolToMolBlock(mol) + "\n$$$$\n"
 
 
 @app.route("/api/structure-with-hotspots", methods=["POST"])
