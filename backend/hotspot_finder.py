@@ -283,14 +283,57 @@ def find_small_molecule_features(structure_path: str,
 
         ranked.sort(key=lambda x: x["weight"], reverse=True)
 
-        # Extract top atom indices for RFD3 select_buried
+        # Extract top atom indices — cluster by 3D proximity to find
+        # a contiguous hydrophobic patch rather than scattered atoms.
+        # This gives RFD3 a geometrically coherent burial target.
+        hydrophobic_feats = [f for f in ranked
+                             if f["family"] in ("Hydrophobe", "LumpedHydrophobe", "Aromatic")]
+
         top_atoms = []
         seen = set()
-        for feat in ranked[:8]:
-            for aid in feat["atom_ids"]:
+
+        if hydrophobic_feats:
+            import numpy as np
+            # Find the hydrophobic feature with most atom coverage as seed
+            seed = max(hydrophobic_feats, key=lambda f: len(f["atom_ids"]))
+            seed_pos = np.array(seed["position"])
+
+            # Add seed atoms
+            for aid in seed["atom_ids"]:
                 if aid not in seen:
                     top_atoms.append(aid)
                     seen.add(aid)
+
+            # Add nearby hydrophobic features within 4Å of seed centroid
+            for feat in hydrophobic_feats:
+                if feat is seed:
+                    continue
+                feat_pos = np.array(feat["position"])
+                if np.linalg.norm(feat_pos - seed_pos) < 4.0:
+                    for aid in feat["atom_ids"]:
+                        if aid not in seen:
+                            top_atoms.append(aid)
+                            seen.add(aid)
+
+            # If cluster is too small, expand radius to 6Å
+            if len(top_atoms) < 4:
+                for feat in hydrophobic_feats:
+                    feat_pos = np.array(feat["position"])
+                    if np.linalg.norm(feat_pos - seed_pos) < 6.0:
+                        for aid in feat["atom_ids"]:
+                            if aid not in seen:
+                                top_atoms.append(aid)
+                                seen.add(aid)
+        else:
+            # No hydrophobic features — fall back to top ranked features
+            for feat in ranked[:4]:
+                for aid in feat["atom_ids"]:
+                    if aid not in seen:
+                        top_atoms.append(aid)
+                        seen.add(aid)
+
+        # Cap at 8 atoms to keep the burial target manageable
+        top_atoms = top_atoms[:8]
 
         # Map atom indices to PDB atom names for RFD3 input
         atom_names = []
