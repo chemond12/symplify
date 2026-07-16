@@ -506,6 +506,7 @@ def _analyze_structure(pdb_path: str) -> dict:
         "suggested_type":  suggested["type"],
         "n_chains":        len(chain_info),
     }
+@app.route("/api/score-difficulty", methods=["POST"])
 def score_difficulty():
     """Score target difficulty without creating a job."""
     if "file" not in request.files:
