@@ -1694,12 +1694,25 @@ function HotspotViewer({ file, chain, targetType, scores }) {
   const [error,   setError]   = useState(null);
 
   useEffect(() => {
-    if (!viewerRef.current || !window.$3Dmol) return;
+    if (!viewerRef.current) return;
+    if (!window.$3Dmol) {
+      setError('3Dmol.js not loaded');
+      setLoading(false);
+      return;
+    }
+
+    const el = viewerRef.current;
+    // Force explicit dimensions so 3Dmol canvas renders correctly
+    el.style.width  = '100%';
+    el.style.height = '280px';
+    el.style.position = 'relative';
+
     if (glRef.current) { try { glRef.current.clear(); } catch(e) {} }
 
-    const viewer = window.$3Dmol.createViewer(viewerRef.current, {
-      backgroundColor: '#0B1628',
+    const viewer = window.$3Dmol.createViewer(el, {
+      backgroundColor: '0x0B1628',
       antialias: true,
+      id: `viewer-${Date.now()}`,
     });
     glRef.current = viewer;
 
@@ -1723,9 +1736,10 @@ function HotspotViewer({ file, chain, targetType, scores }) {
 
         // Detect format — CIF files get converted to SDF by backend
         const isCif = filename.endsWith('.cif') || filename.endsWith('.cif.gz');
-        const fmt   = isCif ? 'sdf' : 'pdb';
+        const fmt   = isCif ? 'mol' : 'pdb';
 
         viewer.addModel(text, fmt);
+        viewer.setStyle({}, {});  // clear defaults
 
         if (targetType === 'protein') {
           // Base style: dark grey cartoon for whole chain
@@ -1779,6 +1793,7 @@ function HotspotViewer({ file, chain, targetType, scores }) {
         }
 
         viewer.zoomTo();
+        viewer.resize();
         viewer.render();
         setLoading(false);
       } catch(e) {
