@@ -89,12 +89,22 @@ def create_job():
       - name: job name
       - config: JSON string of job parameters
     """
-    if "file" not in request.files:
+    # Check if file was pre-fetched from RCSB (path provided instead of upload)
+    if "file" not in request.files and "file_path" in request.form:
+        file_path = request.form.get("file_path")
+        if not Path(file_path).exists():
+            return jsonify({"error": "Pre-fetched file not found"}), 400
+        filename = Path(file_path).name
+    elif "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
+    else:
+        f           = request.files["file"]
+        filename    = secure_filename(f.filename)
+        file_path   = str(UPLOAD_DIR / filename)
+        f.save(file_path)
 
-    f           = request.files["file"]
     target_type = request.form.get("target_type", "protein")
-    name        = request.form.get("name", f.filename)
+    name        = request.form.get("name", filename)
     config_str  = request.form.get("config", "{}")
 
     try:
@@ -102,20 +112,15 @@ def create_job():
     except json.JSONDecodeError:
         return jsonify({"error": "Invalid config JSON"}), 400
 
-    # Save uploaded file
-    filename = secure_filename(f.filename)
-    upload_path = UPLOAD_DIR / filename
-    f.save(str(upload_path))
-
     # Create job in DB
-    job_id = db.create_job(name, target_type, str(upload_path), config)
+    job_id = db.create_job(name, target_type, file_path, config)
     db.init_stages(job_id, target_type)
 
     # Submit pipeline in background thread
     def run():
         try:
             db.update_job_status(job_id, "running")
-            router.submit(job_id, target_type, str(upload_path), config)
+            router.submit(job_id, target_type, str(file_path), config)
         except Exception as e:
             db.update_job_status(job_id, "failed", str(e))
 
@@ -312,7 +317,195 @@ def confirm_job(job_id):
 # API: Pre-flight scoring
 # ---------------------------------------------------------------------------
 
-@app.route("/api/score-difficulty", methods=["POST"])
+@app.route("/api/analyze-structure", methods=["POST"])
+def analyze_structure():
+    """
+    Parse an uploaded PDB/CIF and return chain information.
+    Used by the UI to auto-detect target type and populate chain selector.
+
+    Returns:
+    {
+        chains: [
+            {id: "A", type: "protein", n_residues: 120, description: "Chain A — protein (120 residues)"},
+            {id: "B", type: "small_molecule", resname: "HCY", n_atoms: 26, description: "Chain B — HCY (small molecule)"},
+        ],
+        suggested_chain: "A",
+        suggested_type: "protein",
+        n_chains: 2,
+    }
+    """
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    f        = request.files["file"]
+    filename = secure_filename(f.filename)
+    tmp_path = UPLOAD_DIR / f"tmp_analyze_{filename}"
+    f.save(str(tmp_path))
+
+    try:
+        result = _analyze_structure(str(tmp_path))
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
+def _analyze_structure(pdb_path: str) -> dict:
+    """Parse PDB/CIF and return chain metadata."""
+    waters    = {"HOH", "WAT", "H2O", "DOD"}
+    std_aa    = {
+        "ALA","ARG","ASN","ASP","CYS","GLN","GLU","GLY","HIS","ILE",
+        "LEU","LYS","MET","PHE","PRO","SER","THR","TRP","TYR","VAL",
+        "SEC","PYL","HSD","HSE","HSP","MSE",
+    }
+
+    path   = str(pdb_path)
+    chains = {}
+
+    # For CIF files, parse _atom_site loop directly
+    if path.endswith((".cif", ".cif.gz")):
+        import gzip, re
+
+        if path.endswith(".gz"):
+            with gzip.open(path, 'rt', errors='ignore') as f:
+                content = f.read()
+        else:
+            with open(path, errors='ignore') as f:
+                content = f.read()
+
+        # Try biotite first
+        try:
+            import biotite.structure.io.pdbx as pdbx
+            import tempfile, shutil
+            if path.endswith(".gz"):
+                with tempfile.NamedTemporaryFile(suffix=".cif", delete=False) as tmp:
+                    with gzip.open(path, "rb") as gz:
+                        shutil.copyfileobj(gz, tmp)
+                    tmp_cif = tmp.name
+            else:
+                tmp_cif = path
+            cif_file = pdbx.CIFFile.read(tmp_cif)
+            atom_arr = pdbx.get_structure(cif_file, model=1)
+            for atom in atom_arr:
+                chain_id = atom.chain_id or "A"
+                resname  = atom.res_name
+                hetero   = atom.hetero
+                if chain_id not in chains:
+                    chains[chain_id] = {"atom_res": set(), "hetatm_res": set()}
+                if hetero and resname not in waters:
+                    chains[chain_id]["hetatm_res"].add(resname)
+                elif not hetero:
+                    chains[chain_id]["atom_res"].add(resname)
+        except Exception:
+            # Manual CIF parsing — find atom_site block
+            # Look for _chem_comp.id to identify CCD ligand files
+            comp_match = re.search(r'_chem_comp\.id\s+(\S+)', content)
+            if comp_match:
+                # This is a CCD ligand file — treat as single small molecule
+                resname  = comp_match.group(1).strip('"\'')
+                n_atoms  = len(re.findall(r'^ATOM|^HETATM', content, re.MULTILINE))
+                # Count atoms from _atom_site loop
+                atom_matches = re.findall(r'\n\s*\S+\s+\S+\s+\S+\s+(\S+)\s+', content)
+                n_atoms = max(n_atoms, 10)  # fallback estimate
+                chains["A"] = {"atom_res": set(), "hetatm_res": {resname}}
+            else:
+                # Try parsing _atom_site columns manually
+                lines = content.split('\n')
+                in_atom_loop = False
+                col_map = {}
+                col_idx = 0
+                for line in lines:
+                    line = line.strip()
+                    if '_atom_site.' in line:
+                        in_atom_loop = True
+                        col_name = line.split('.')[-1].strip()
+                        col_map[col_name] = col_idx
+                        col_idx += 1
+                    elif in_atom_loop and line and not line.startswith('_') and not line.startswith('#'):
+                        parts = line.split()
+                        if len(parts) >= max(col_map.values(), default=0) + 1:
+                            try:
+                                chain_id = parts[col_map.get('auth_asym_id', col_map.get('label_asym_id', 0))]
+                                resname  = parts[col_map.get('label_comp_id', col_map.get('auth_comp_id', 1))]
+                                group    = parts[col_map.get('group_PDB', 0)] if 'group_PDB' in col_map else 'HETATM'
+                                if chain_id not in chains:
+                                    chains[chain_id] = {"atom_res": set(), "hetatm_res": set()}
+                                if group == 'ATOM':
+                                    chains[chain_id]["atom_res"].add(resname)
+                                elif resname not in waters:
+                                    chains[chain_id]["hetatm_res"].add(resname)
+                            except (IndexError, KeyError):
+                                pass
+                    elif in_atom_loop and line.startswith('#'):
+                        in_atom_loop = False
+                        col_idx = 0
+                        col_map = {}
+
+    # Parse as PDB
+    if not chains:
+        with open(path, errors='ignore') as f:
+            for line in f:
+                rec = line[:6].strip()
+                if rec not in ("ATOM", "HETATM"):
+                    continue
+                chain_id = line[21].strip() or "A"
+                resname  = line[17:20].strip()
+                if chain_id not in chains:
+                    chains[chain_id] = {"atom_res": set(), "hetatm_res": set()}
+                if rec == "HETATM" and resname not in waters:
+                    chains[chain_id]["hetatm_res"].add(resname)
+                elif rec == "ATOM":
+                    chains[chain_id]["atom_res"].add(resname)
+
+    if not chains:
+        raise ValueError("No ATOM or HETATM records found in file")
+
+    # Classify each chain
+    chain_info = []
+    for chain_id in sorted(chains.keys()):
+        atom_res   = chains[chain_id]["atom_res"]
+        hetatm_res = chains[chain_id]["hetatm_res"]
+        n_aa       = len(atom_res & std_aa)
+
+        if n_aa >= 3:
+            chain_info.append({
+                "id":          chain_id,
+                "type":        "protein",
+                "n_residues":  len(atom_res),
+                "description": f"Chain {chain_id} — protein ({len(atom_res)} residue types)",
+            })
+        elif hetatm_res and n_aa == 0:
+            resname = sorted(hetatm_res)[0]
+            chain_info.append({
+                "id":          chain_id,
+                "type":        "small_molecule",
+                "resname":     resname,
+                "n_residues":  len(hetatm_res),
+                "description": f"Chain {chain_id} — {resname} (small molecule)",
+            })
+        elif hetatm_res and n_aa >= 1:
+            chain_info.append({
+                "id":          chain_id,
+                "type":        "protein",
+                "n_residues":  len(atom_res) + len(hetatm_res),
+                "description": f"Chain {chain_id} — protein with ligand",
+            })
+
+    if not chain_info:
+        raise ValueError("Could not classify any chains")
+
+    proteins = [c for c in chain_info if c["type"] == "protein"]
+    smols    = [c for c in chain_info if c["type"] == "small_molecule"]
+    suggested = proteins[0] if proteins else smols[0]
+
+    return {
+        "chains":          chain_info,
+        "suggested_chain": suggested["id"],
+        "suggested_type":  suggested["type"],
+        "n_chains":        len(chain_info),
+    }
 def score_difficulty():
     """Score target difficulty without creating a job."""
     if "file" not in request.files:
@@ -343,6 +536,186 @@ def score_difficulty():
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
+
+
+@app.route("/api/fetch-pdb/<pdb_id>", methods=["GET"])
+def fetch_pdb(pdb_id):
+    """
+    Fetch a structure from RCSB by:
+      - 4-character PDB ID (e.g. 1KDM) → downloads full structure PDB
+      - 2-3 character CCD ligand code (e.g. 7V7, HCY) → downloads ideal ligand CIF
+    """
+    import urllib.request
+    import urllib.error
+
+    pdb_id = pdb_id.upper().strip()
+    if not pdb_id.isalnum() or len(pdb_id) > 4 or len(pdb_id) < 2:
+        return jsonify({"error": "Invalid ID — enter a 4-character PDB ID or 2-3 character CCD code"}), 400
+
+    is_ligand = len(pdb_id) <= 3
+
+    if is_ligand:
+        url      = f"https://files.rcsb.org/ligands/download/{pdb_id}.cif"
+        filename = f"{pdb_id}.cif"
+    else:
+        url      = f"https://files.rcsb.org/download/{pdb_id}.pdb"
+        filename = f"{pdb_id}.pdb"
+
+    out_path = UPLOAD_DIR / filename
+
+    try:
+        urllib.request.urlretrieve(url, str(out_path))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            label = "CCD ligand code" if is_ligand else "PDB ID"
+            return jsonify({"error": f"{label} {pdb_id} not found in RCSB"}), 404
+        return jsonify({"error": f"Failed to fetch {pdb_id}: {e}"}), 502
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+    try:
+        analysis = _analyze_structure(str(out_path))
+        # For CCD ligand CIFs, force type to small_molecule
+        if is_ligand:
+            for c in analysis.get("chains", []):
+                c["type"] = "small_molecule"
+            analysis["suggested_type"] = "small_molecule"
+
+        return jsonify({
+            **analysis,
+            "pdb_id":    pdb_id,
+            "filename":  filename,
+            "file_path": str(out_path),
+            "file_size": out_path.stat().st_size,
+            "is_ligand": is_ligand,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/score-difficulty-by-path", methods=["POST"])
+def score_difficulty_by_path():
+    """Score difficulty for a file already on the server (pre-fetched from RCSB)."""
+    data        = request.get_json() or {}
+    file_path   = data.get("file_path")
+    target_type = data.get("target_type", "protein")
+
+    if not file_path or not Path(file_path).exists():
+        return jsonify({"error": "File not found"}), 400
+
+    try:
+        if target_type == "protein":
+            report = score_protein(file_path)
+        else:
+            report = score_small_molecule(file_path)
+
+        return jsonify({
+            "overall":             report.overall,
+            "grade":               report.grade,
+            "factors":             report.factors,
+            "recommended_designs": report.recommended_designs,
+            "warnings":            report.warnings,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/structure/<path:filename>", methods=["GET"])
+def serve_structure(filename):
+    """Serve an uploaded structure file to the browser for 3D visualization."""
+    safe = secure_filename(filename)
+    path = UPLOAD_DIR / safe
+    if not path.exists():
+        return jsonify({"error": "File not found"}), 404
+
+    # For CIF files, convert to SDF via RDKit SMILES for reliable 3D rendering
+    if str(safe).endswith(".cif"):
+        try:
+            sdf = _cif_to_sdf(str(path))
+            if sdf:
+                from flask import Response
+                return Response(sdf, mimetype="chemical/x-mdl-sdfile")
+        except Exception:
+            pass
+
+    mimetype = "chemical/x-cif" if str(safe).endswith(".cif") else "chemical/x-pdb"
+    return send_file(str(path), mimetype=mimetype, download_name=safe)
+
+
+def _cif_to_sdf(cif_path: str) -> str:
+    """Convert CCD CIF to SDF via RDKit for 3D visualization."""
+    import re
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+
+    with open(cif_path, errors='ignore') as f:
+        content = f.read()
+
+    # Extract SMILES
+    smiles = None
+    for line in content.split('\n'):
+        line = line.strip()
+        if 'SMILES_CANONICAL' in line and 'CACTVS' in line:
+            m = re.search(r'"([^"]{5,})"', line)
+            if m:
+                smiles = m.group(1)
+                break
+
+    if not smiles:
+        return None
+
+    mol = Chem.MolFromSmiles(smiles)
+    if not mol:
+        return None
+
+    # Generate 3D coordinates
+    mol = Chem.AddHs(mol)
+    result = AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+    if result != 0:
+        # Fallback to 2D
+        AllChem.Compute2DCoords(mol)
+    AllChem.MMFFOptimizeMolecule(mol)
+    mol = Chem.RemoveHs(mol)
+
+    return Chem.MolToMolBlock(mol)
+
+
+@app.route("/api/structure-with-hotspots", methods=["POST"])
+def structure_with_hotspots():
+    """
+    Return a PDB file with PESTO hotspot scores embedded in B-factor column.
+    Used by the 3D viewer to color residues by binding probability.
+    Expects JSON: {filename, chain, scores: {resid: score}}
+    """
+    data     = request.get_json() or {}
+    filename = secure_filename(data.get("filename", ""))
+    chain    = data.get("chain", "A")
+    scores   = data.get("scores", {})   # {"A47": 0.93, "A52": 0.84, ...}
+
+    path = UPLOAD_DIR / filename
+    if not path.exists():
+        return jsonify({"error": "File not found"}), 404
+
+    # Rewrite PDB with hotspot scores in B-factor column
+    output_lines = []
+    try:
+        with open(str(path), errors="ignore") as f:
+            for line in f:
+                if line.startswith(("ATOM", "HETATM")):
+                    rec_chain   = line[21].strip()
+                    res_num     = line[22:26].strip()
+                    res_id_str  = f"{rec_chain}{res_num}"
+                    score       = scores.get(res_id_str, 0.0)
+                    # Write score into B-factor field (cols 61-66)
+                    new_line = line[:60] + f"{score:6.2f}" + line[66:]
+                    output_lines.append(new_line)
+                else:
+                    output_lines.append(line)
+
+        from flask import Response
+        return Response("".join(output_lines), mimetype="chemical/x-pdb")
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/find-hotspots", methods=["POST"])

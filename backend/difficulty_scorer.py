@@ -304,7 +304,43 @@ def _load_molecule(path: str):
                     pass
             return mol
         elif path.endswith((".cif", ".cif.gz")):
-            # Extract SMILES via CCDC or just return None
+            import gzip, re
+            if path.endswith(".gz"):
+                with gzip.open(path, 'rt', errors='ignore') as f:
+                    content = f.read()
+            else:
+                with open(path, errors='ignore') as f:
+                    content = f.read()
+
+            # Parse CCD CIF SMILES lines — format is:
+            # COMPID  TYPE  PROGRAM  VERSION  "SMILES_STRING"
+            smiles = None
+            for line in content.split('\n'):
+                line = line.strip()
+                # Look for lines with SMILES_CANONICAL CACTVS first (most reliable)
+                if 'SMILES_CANONICAL' in line and 'CACTVS' in line:
+                    # Extract last quoted or unquoted token
+                    m = re.search(r'"([^"]{5,})"\\s*$', line)
+                    if not m:
+                        m = re.search(r'"([^"]{5,})"', line)
+                    if m:
+                        smiles = m.group(1)
+                        break
+
+            # Fallback: any SMILES line
+            if not smiles:
+                for line in content.split('\n'):
+                    line = line.strip()
+                    if 'SMILES' in line and not line.startswith('_'):
+                        m = re.search(r'"([A-Za-z0-9@\[\]()=#\+\-\./\\%]{5,})"', line)
+                        if m:
+                            smiles = m.group(1)
+                            break
+
+            if smiles:
+                mol = Chem.MolFromSmiles(smiles)
+                if mol:
+                    return mol
             return None
         else:
             return None

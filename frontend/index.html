@@ -6,6 +6,7 @@
 <title>Symplify — Binder Design Platform</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.3/3Dmol-min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
@@ -608,7 +609,56 @@
 
   .stage-label.active { color: var(--teal); }
 
-  /* Pilot results panel */
+  /* Hotspot viewer */
+  .hotspot-viewer {
+    background: var(--navy);
+    border: 1px solid var(--grey-3);
+    border-radius: var(--radius);
+    overflow: hidden;
+    margin-bottom: 24px;
+    position: relative;
+  }
+
+  .hotspot-viewer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--grey-3);
+  }
+
+  .hotspot-viewer-header h4 {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--grey-2);
+  }
+
+  .viewer-3d {
+    width: 100%;
+    height: 280px;
+    position: relative;
+  }
+
+  .viewer-legend {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 10px 16px;
+    border-top: 1px solid var(--grey-3);
+    font-size: 11px;
+    color: var(--grey-2);
+    font-family: var(--font-mono);
+  }
+
+  .legend-swatch {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    display: inline-block;
+    margin-right: 4px;
+  }
   .pilot-panel {
     background: var(--navy-mid);
     border: 2px solid var(--teal);
@@ -1256,7 +1306,12 @@ const API = {
   },
   async createJob(file, name, targetType, config) {
     const fd = new FormData();
-    fd.append('file', file);
+    if (file._path) {
+      // Pre-fetched from RCSB — pass server-side path instead of re-uploading
+      fd.append('file_path', file._path);
+    } else {
+      fd.append('file', file);
+    }
     fd.append('name', name);
     fd.append('target_type', targetType);
     fd.append('config', JSON.stringify(config));
@@ -1297,8 +1352,7 @@ function Toast({ msg, onClose }) {
 function UploadPage({ onNext }) {
   const [file,       setFile]       = useState(null);
   const [dragOver,   setDragOver]   = useState(false);
-  const [targetType, setTargetType] = useState('protein');
-  const [jobName,    setJobName]    = useState('');
+  const [targetType, setTargetType] = useState(null);
   const [chain,      setChain]      = useState('A');
   const [hotspots,   setHotspots]   = useState([]);
   const [hotInput,   setHotInput]   = useState('');
@@ -1307,6 +1361,9 @@ function UploadPage({ onNext }) {
   const [targetPass, setTargetPass] = useState(96);
   const [showAdv,    setShowAdv]    = useState(false);
   const [loading,    setLoading]    = useState(false);
+  const [analyzing,  setAnalyzing]  = useState(false);
+  const [chainInfo,  setChainInfo]  = useState(null);  // {chains, suggested_chain, suggested_type}
+  const [jobName,    setJobName]    = useState('');
   // Metric thresholds
   const [iptmThresh,  setIptmThresh]  = useState(0.8);
   const [ptmThresh,   setPtmThresh]   = useState(0.8);
@@ -1317,10 +1374,56 @@ function UploadPage({ onNext }) {
   const [hydrophob,   setHydrophob]   = useState(0.25);
   const [minIpae,     setMinIpae]     = useState(1.0);
 
+  const [pdbIdInput, setPdbIdInput] = useState('');
+  const [pdbFetching, setPdbFetching] = useState(false);
+  const [pdbError,   setPdbError]   = useState('');
+
+  async function fetchPdbId() {
+    const id = pdbIdInput.trim().toUpperCase();
+    if (id.length < 2 || id.length > 4) { setPdbError('Enter 2-4 characters'); return; }
+    setPdbFetching(true);
+    setPdbError('');
+    setChainInfo(null);
+    setTargetType(null);
+    try {
+      const r    = await fetch(`/api/fetch-pdb/${id}`);
+      const data = await r.json();
+      if (data.error) { setPdbError(data.error); return; }
+      // Simulate a File object for the rest of the flow
+      setFile({ name: data.filename, size: data.file_size, _path: data.file_path, _pdb_id: id });
+      if (!jobName) setJobName(id);
+      if (data.chains) {
+        setChainInfo(data);
+        setChain(data.suggested_chain);
+        setTargetType(data.suggested_type);
+      }
+    } catch(e) {
+      setPdbError('Failed to fetch from RCSB');
+    } finally {
+      setPdbFetching(false);
+    }
+  }
+
   function handleFile(f) {
     if (!f) return;
     setFile(f);
     if (!jobName) setJobName(f.name.replace(/\.(pdb|cif|cif\.gz)$/i, ''));
+    setAnalyzing(true);
+    setChainInfo(null);
+    setTargetType(null);
+    const fd = new FormData();
+    fd.append('file', f);
+    fetch('/api/analyze-structure', { method: 'POST', body: fd })
+      .then(r => r.json())
+      .then(data => {
+        if (data.chains) {
+          setChainInfo(data);
+          setChain(data.suggested_chain);
+          setTargetType(data.suggested_type);
+        }
+      })
+      .catch(e => console.error('Structure analysis failed:', e))
+      .finally(() => setAnalyzing(false));
   }
 
   function addHotspot(e) {
@@ -1331,10 +1434,21 @@ function UploadPage({ onNext }) {
   }
 
   async function handleSubmit() {
-    if (!file) return;
+    if (!file || !targetType) return;
     setLoading(true);
     try {
-      const diff = await API.scoreTarget(file, targetType);
+      let diff;
+      if (file._path) {
+        // File already on server — score via path endpoint
+        const r = await fetch('/api/score-difficulty-by-path', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file_path: file._path, target_type: targetType }),
+        });
+        diff = await r.json();
+      } else {
+        diff = await API.scoreTarget(file, targetType);
+      }
       onNext({ file, jobName, targetType, chain, hotspots,
                linkerRep,
                nDesigns: nDesigns || (targetType === 'protein' ? 100 : null),
@@ -1363,6 +1477,25 @@ function UploadPage({ onNext }) {
       </p>
 
       <div className="upload-card">
+        {/* PDB ID / CCD fetch */}
+        <div className="field-group" style={{marginBottom:16}}>
+          <span className="field-label">Fetch from RCSB</span>
+          <div className="input-row">
+            <input className="input" placeholder="PDB ID (e.g. 1KDM) or ligand code (e.g. 7V7)"
+                   value={pdbIdInput} maxLength={4}
+                   style={{textTransform:'uppercase', letterSpacing:2, fontFamily:'var(--font-mono)'}}
+                   onChange={e => { setPdbIdInput(e.target.value.toUpperCase()); setPdbError(''); }}
+                   onKeyDown={e => e.key === 'Enter' && fetchPdbId()} />
+            <button className="btn-secondary" onClick={fetchPdbId}
+                    disabled={pdbFetching || pdbIdInput.length < 2}
+                    style={{whiteSpace:'nowrap', padding:'10px 16px'}}>
+              {pdbFetching ? <Spinner /> : 'Fetch →'}
+            </button>
+          </div>
+          {pdbError && <div style={{fontSize:12, color:'var(--red)', marginTop:4}}>{pdbError}</div>}
+          <div className="hint">4-char PDB ID for proteins · 2-3 char CCD code for ligands (e.g. HCY, 7V7) · Or upload a file below</div>
+        </div>
+
         {/* File drop zone */}
         <div
           className={`upload-zone ${dragOver ? 'drag-over' : ''} ${file ? 'has-file' : ''}`}
@@ -1379,23 +1512,69 @@ function UploadPage({ onNext }) {
             {file ? `✓ ${file.name}` : 'Drop PDB or CIF file here'}
           </span>
           <span className="upload-hint">
-            {file ? `${(file.size/1024).toFixed(1)} KB` : 'or click to browse'}
+            {analyzing ? 'Analysing structure…' :
+             file ? `${(file.size/1024).toFixed(1)} KB` : 'or click to browse'}
           </span>
         </div>
 
-        {/* Target type */}
-        <div className="field-group">
-          <span className="field-label">Target type</span>
-          <div className="field-row">
-            {['protein','small_molecule'].map(t => (
-              <button key={t}
-                className={`type-btn ${targetType === t ? 'selected' : ''}`}
-                onClick={() => setTargetType(t)}>
-                {t === 'protein' ? '🧬 Protein' : '⚗️ Small molecule'}
-              </button>
-            ))}
+        {/* Auto-detected structure info */}
+        {analyzing && (
+          <div style={{display:'flex', alignItems:'center', gap:10, marginBottom:20,
+                       color:'var(--grey-2)', fontSize:13}}>
+            <Spinner /> Detecting chains and target type…
           </div>
-        </div>
+        )}
+
+        {chainInfo && !analyzing && (
+          <div className="field-group">
+            <span className="field-label">
+              Detected structure
+              <span style={{marginLeft:8, fontWeight:400, textTransform:'none',
+                            color:'var(--teal)', fontSize:11}}>
+                {chainInfo.n_chains} chain{chainInfo.n_chains !== 1 ? 's' : ''} found
+              </span>
+            </span>
+            <div className="field-row" style={{flexWrap:'wrap'}}>
+              {chainInfo.chains.map(c => (
+                <button key={c.id}
+                  className={`type-btn ${chain === c.id ? 'selected' : ''}`}
+                  style={{flex:'0 0 auto', minWidth:0}}
+                  onClick={() => { setChain(c.id); setTargetType(c.type); }}>
+                  <div style={{fontFamily:'var(--font-mono)', fontSize:13, fontWeight:600}}>
+                    Chain {c.id}
+                  </div>
+                  <div style={{fontSize:11, color: chain === c.id ? 'var(--teal)' : 'var(--grey-2)',
+                               marginTop:2}}>
+                    {c.type === 'protein' ? '🧬' : '⚗️'} {c.type === 'protein' ? 'Protein' : c.resname || 'Small mol'}
+                  </div>
+                </button>
+              ))}
+            </div>
+            {targetType && (
+              <div style={{fontSize:12, color:'var(--grey-2)', marginTop:6}}>
+                Will use <span style={{color:'var(--teal)'}}>
+                  {targetType === 'protein' ? 'BindCraft' : 'RFDiffusion3'}
+                </span> for chain {chain}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Manual target type override if no structure detected */}
+        {!chainInfo && !analyzing && (
+          <div className="field-group">
+            <span className="field-label">Target type</span>
+            <div className="field-row">
+              {['protein','small_molecule'].map(t => (
+                <button key={t}
+                  className={`type-btn ${targetType === t ? 'selected' : ''}`}
+                  onClick={() => setTargetType(t)}>
+                  {t === 'protein' ? '🧬 Protein' : '⚗️ Small molecule'}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Job name */}
         <div className="field-group">
@@ -1454,13 +1633,6 @@ function UploadPage({ onNext }) {
         {showAdv && (
           <div className="advanced-panel">
             <div className="advanced-grid">
-              {targetType === 'protein' && (
-                <div className="field-group" style={{marginBottom:0}}>
-                  <span className="field-label">Target chain</span>
-                  <input className="input" value={chain}
-                         onChange={e => setChain(e.target.value)} />
-                </div>
-              )}
               <div className="field-group" style={{marginBottom:0}}>
                 <span className="field-label">Target passing designs</span>
                 <input className="input" type="number" value={targetPass}
@@ -1502,10 +1674,154 @@ function UploadPage({ onNext }) {
         )}
 
         <button className="btn-primary" onClick={handleSubmit}
-                disabled={!file || !jobName || loading}>
-          {loading ? <><Spinner /> &nbsp;Analysing target…</> : 'Continue →'}
+                disabled={!file || !jobName || loading || analyzing || !targetType}>
+          {loading ? <><Spinner /> &nbsp;Analysing target…</> :
+           analyzing ? <><Spinner /> &nbsp;Reading structure…</> :
+           'Continue →'}
         </button>
       </div>
+    </div>
+  );
+}
+
+// ============================================================
+// Hotspot 3D viewer
+// ============================================================
+function HotspotViewer({ file, chain, targetType, scores }) {
+  const viewerRef = useRef(null);
+  const glRef     = useRef(null);
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState(null);
+
+  useEffect(() => {
+    if (!viewerRef.current || !window.$3Dmol) return;
+    if (glRef.current) { try { glRef.current.clear(); } catch(e) {} }
+
+    const viewer = window.$3Dmol.createViewer(viewerRef.current, {
+      backgroundColor: '#0B1628',
+      antialias: true,
+    });
+    glRef.current = viewer;
+
+    const filename = file.name || file.filename || '';
+    const hasScores = scores && Object.keys(scores).length > 0;
+
+    async function loadStructure() {
+      try {
+        // Always fetch as raw structure first
+        const r = await fetch(`/api/structure/${filename}`);
+        if (!r.ok) throw new Error('Failed to fetch structure');
+        const text = await r.text();
+
+        // Detect format — CIF files get converted to SDF by backend
+        const isCif = filename.endsWith('.cif') || filename.endsWith('.cif.gz');
+        const fmt   = isCif ? 'sdf' : 'pdb';
+
+        viewer.addModel(text, fmt);
+
+        if (targetType === 'protein') {
+          // Base style: dark grey cartoon for whole chain
+          viewer.setStyle({chain}, { cartoon: { color: '#2A3F5A' } });
+
+          if (hasScores) {
+            // Color by score bands — apply from lowest to highest so highest wins
+            const bands = [
+              { min: 0.3, max: 0.5, color: '#7E95B8' },  // light blue — low
+              { min: 0.5, max: 0.7, color: '#F5A623' },  // amber — medium
+              { min: 0.7, max: 0.85, color: '#4ECDC4' }, // light teal — high
+              { min: 0.85, max: 1.0, color: '#00C2B2' }, // bright teal — very high
+            ];
+
+            bands.forEach(({ min, max, color }) => {
+              const resis = Object.entries(scores)
+                .filter(([k, v]) => k.startsWith(chain) && v >= min && v < max + 0.001)
+                .map(([k]) => parseInt(k.slice(chain.length)));
+              if (resis.length > 0) {
+                viewer.setStyle(
+                  { chain, resi: resis },
+                  { cartoon: { color }, stick: { radius: 0.1, color } }
+                );
+              }
+            });
+
+            // Add labels for top hotspots
+            const topHots = Object.entries(scores)
+              .filter(([k, v]) => k.startsWith(chain) && v >= 0.85)
+              .sort(([,a],[,b]) => b - a)
+              .slice(0, 5);
+            topHots.forEach(([k, v]) => {
+              const resi = parseInt(k.slice(chain.length));
+              viewer.addLabel(`${k} (${v.toFixed(2)})`, {
+                position: { resi, chain },
+                fontSize: 10,
+                fontColor: '#00C2B2',
+                backgroundColor: 'rgba(11,22,40,0.8)',
+                borderColor: '#00C2B2',
+                borderThickness: 1,
+                inFront: true,
+              });
+            });
+          }
+        } else {
+          // Small molecule — try stick + sphere
+          viewer.setStyle({}, {
+            stick:  { colorscheme: 'Jmol', radius: 0.15 },
+            sphere: { colorscheme: 'Jmol', radius: 0.4  },
+          });
+        }
+
+        viewer.zoomTo();
+        viewer.render();
+        setLoading(false);
+      } catch(e) {
+        console.error('Viewer error:', e);
+        setError('Could not load structure');
+        setLoading(false);
+      }
+    }
+
+    loadStructure();
+    return () => { try { viewer.clear(); } catch(e) {} };
+  }, [file, chain, scores]);
+
+  return (
+    <div className="hotspot-viewer">
+      <div className="hotspot-viewer-header">
+        <h4>
+          {targetType === 'protein'
+            ? 'Structure — colored by binding probability'
+            : 'Ligand structure'}
+        </h4>
+        <span style={{fontSize:10, color:'var(--grey-3)'}}>Drag to rotate · Scroll to zoom</span>
+      </div>
+      <div className="viewer-3d" ref={viewerRef}>
+        {loading && (
+          <div style={{position:'absolute', inset:0, display:'flex', alignItems:'center',
+                       justifyContent:'center', color:'var(--grey-2)', fontSize:12, gap:8}}>
+            <Spinner /> Loading structure…
+          </div>
+        )}
+        {error && (
+          <div style={{position:'absolute', inset:0, display:'flex', alignItems:'center',
+                       justifyContent:'center', color:'var(--grey-3)', fontSize:12}}>
+            {error}
+          </div>
+        )}
+      </div>
+      {targetType === 'protein' && (
+        <div className="viewer-legend">
+          {scores && Object.keys(scores).length > 0 ? (
+            <>
+              <span><span className="legend-swatch" style={{background:'#7E95B8'}} />Low (0.3+)</span>
+              <span><span className="legend-swatch" style={{background:'#F5A623'}} />Medium (0.5+)</span>
+              <span><span className="legend-swatch" style={{background:'#4ECDC4'}} />High (0.7+)</span>
+              <span><span className="legend-swatch" style={{background:'#00C2B2'}} />Very high (0.85+)</span>
+            </>
+          ) : (
+            <span style={{color:'var(--grey-3)'}}>Running PESTO hotspot analysis…</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1519,7 +1835,6 @@ function DifficultyPage({ data, onBack, onSubmit }) {
   const [autoHots, setAutoHots]     = useState(null);
   const [loadingH, setLoadingH]     = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [blankOk,    setBlankOk]    = useState(false);
 
   useEffect(() => {
     if (hotspots.length === 0) {
@@ -1539,8 +1854,6 @@ function DifficultyPage({ data, onBack, onSubmit }) {
 
   const circumference = 2 * Math.PI * 48;
   const offset        = circumference * (1 - score / 100);
-  // PeSTo ran but found no interface — ask before proceeding with blank hotspots
-  const pestoNone = autoHots?.method === 'pesto_none' && hotspots.length === 0 && !blankOk;
 
   async function handleSubmit() {
     setSubmitting(true);
@@ -1629,8 +1942,19 @@ function DifficultyPage({ data, onBack, onSubmit }) {
         </div>
       )}
 
+      {/* 3D structure viewer */}
+      {file && (
+        <HotspotViewer
+          key={autoHots ? 'with-scores' : 'no-scores'}
+          file={file}
+          chain={data.chain}
+          targetType={targetType}
+          scores={autoHots?.details?.scores || null}
+        />
+      )}
+
       {/* Hotspots */}
-      <div className="section-label" style={{marginTop:24}}>
+      <div className="section-label" style={{marginTop:8}}>
         {targetType === 'protein' ? 'Hotspot residues' : 'Target binding features'}
         {autoHots && (
           <span className={`confidence-badge ${autoHots.confidence}`}
@@ -1664,25 +1988,11 @@ function DifficultyPage({ data, onBack, onSubmit }) {
       {autoHots?.details?.note && (
         <div className="hint" style={{marginBottom:20}}>{autoHots.details.note}</div>
       )}
-      {pestoNone && (
-        <div className="warnings-box" style={{borderColor:'var(--amber)', marginBottom:20}}>
-          <h4>PeSTo found no hotspots</h4>
-          <p style={{fontSize:13, color:'var(--grey-2)', marginTop:4}}>
-            No protein-interface residues were found on this target. Leave the hotspot
-            field blank and let BindCraft auto-select the binding mode?
-          </p>
-          <div className="action-row" style={{marginTop:12}}>
-            <button className="btn-secondary" onClick={onBack}>No — add hotspots</button>
-            <button className="btn-primary" style={{width:'auto', padding:'10px 24px'}}
-                    onClick={() => setBlankOk(true)}>Yes — leave blank</button>
-          </div>
-        </div>
-      )}
 
       <div className="action-row">
         <button className="btn-secondary" onClick={onBack}>← Back</button>
         <button className="btn-primary" style={{width:'auto', padding:'12px 32px'}}
-                onClick={handleSubmit} disabled={submitting || pestoNone}>
+                onClick={handleSubmit} disabled={submitting}>
           {submitting ? <><Spinner /> &nbsp;Submitting…</> : 'Launch design run →'}
         </button>
       </div>
