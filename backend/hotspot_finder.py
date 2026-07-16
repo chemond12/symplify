@@ -210,25 +210,42 @@ def find_small_molecule_features(structure_path: str,
     try:
         from rdkit import Chem
         from rdkit.Chem import AllChem
-        from rdkit.Chem.Pharm3D import Pharmacophore
-        from rdkit.Chem import MolFromPDBFile
 
-        # Load molecule
+        # Load molecule — handle CIF files via SMILES extraction
         path = str(structure_path)
-        if path.endswith(".pdb"):
-            mol = Chem.MolFromPDBFile(path, sanitize=True, removeHs=False)
-        else:
-            mol = None
+        mol  = None
+
+        if path.endswith(('.cif', '.cif.gz')):
+            import gzip, re
+            with (gzip.open(path, 'rt', errors='ignore') if path.endswith('.gz')
+                  else open(path, errors='ignore')) as f:
+                content = f.read()
+            smiles = None
+            for line in content.split('\n'):
+                if 'SMILES_CANONICAL' in line and 'CACTVS' in line:
+                    m = re.search(r'"([^"]{5,})"', line)
+                    if m:
+                        smiles = m.group(1)
+                        break
+            if smiles:
+                mol = Chem.MolFromSmiles(smiles)
+        elif path.endswith(".pdb"):
+            mol = Chem.MolFromPDBFile(path, sanitize=False, removeHs=False)
+            if mol:
+                try:
+                    Chem.SanitizeMol(mol)
+                except Exception:
+                    pass
 
         if mol is None:
-            return _fallback_sm_result()
+            return _fallback_sm_result("Could not parse molecule from file")
 
         # Compute pharmacophore features
         factory = _get_feature_factory()
         if factory is None:
-            return _fallback_sm_result()
+            return _fallback_sm_result("Could not build feature factory")
 
-        feats = factory.GetFeaturesForMol(mol)
+        feats = _get_features(factory, mol)
 
         # Categorize and rank features
         ranked = []
@@ -295,13 +312,34 @@ def find_small_molecule_features(structure_path: str,
 
 def _get_feature_factory():
     try:
-        from rdkit.Chem import MolChemicalFeatures
+        from rdkit.Chem import rdMolChemicalFeatures
         from rdkit import RDConfig
         import os
         fdef_path = os.path.join(RDConfig.RDDataDir, "BaseFeatures.fdef")
-        return MolChemicalFeatures.BuildFeatureFactory(fdef_path)
+        return rdMolChemicalFeatures.BuildFeatureFactory(fdef_path)
     except Exception:
-        return None
+        try:
+            from rdkit.Chem import MolChemicalFeatures
+            from rdkit import RDConfig
+            import os
+            fdef_path = os.path.join(RDConfig.RDDataDir, "BaseFeatures.fdef")
+            return MolChemicalFeatures.BuildFeatureFactory(fdef_path)
+        except Exception:
+            return None
+
+
+def _get_features(factory, mol):
+    """Get pharmacophore features using whichever RDKit API is available."""
+    try:
+        # Newer RDKit API
+        n = factory.GetNumMolFeatures(mol)
+        return [factory.GetMolFeature(mol, i) for i in range(n)]
+    except Exception:
+        try:
+            # Older RDKit API
+            return factory.GetFeaturesForMol(mol)
+        except Exception:
+            return []
 
 
 def _fallback_sm_result(error: str = "") -> HotspotResult:
