@@ -1714,19 +1714,27 @@ function HotspotViewer({ file, chain, targetType, scores }) {
       return;
     }
 
+    // Defer initialization so the div is fully painted and has dimensions
+    const timer = setTimeout(() => {
     const el = viewerRef.current;
+    if (!el) return;
+
     // Force explicit dimensions so 3Dmol canvas renders correctly
-    el.style.width  = '100%';
-    el.style.height = '280px';
+    el.style.width    = '100%';
+    el.style.height   = '280px';
     el.style.position = 'relative';
 
     if (glRef.current) { try { glRef.current.clear(); } catch(e) {} }
 
+    // Use explicit pixel dimensions
+    const w = el.getBoundingClientRect().width || 600;
+    const h = 280;
+
     const viewer = window.$3Dmol.createViewer(el, {
       backgroundColor: 0x0B1628,
       antialias: true,
-      width:  el.offsetWidth  || 600,
-      height: el.offsetHeight || 280,
+      width:  w,
+      height: h,
     });
     glRef.current = viewer;
 
@@ -1817,7 +1825,12 @@ function HotspotViewer({ file, chain, targetType, scores }) {
     }
 
     loadStructure();
-    return () => { try { viewer.clear(); } catch(e) {} };
+    }, 150); // delay ensures div is painted
+
+    return () => {
+      clearTimeout(timer);
+      try { if (glRef.current) glRef.current.clear(); } catch(e) {}
+    };
   }, [file, chain, scores]);
 
   return (
@@ -1868,25 +1881,49 @@ function HotspotViewer({ file, chain, targetType, scores }) {
 // STEP 2: Difficulty score + hotspot review
 // ============================================================
 function DifficultyPage({ data, onBack, onSubmit }) {
-  const { difficulty, targetType, file } = data;
-  const [hotspots, setHotspots]     = useState(data.hotspots);
-  const [autoHots, setAutoHots]     = useState(null);
-  const [loadingH, setLoadingH]     = useState(false);
+  const { targetType, file } = data;
+  const [hotspots,   setHotspots]   = useState(data.hotspots || []);
+  const [autoHots,   setAutoHots]   = useState(null);
+  const [loadingH,   setLoadingH]   = useState(true);  // start true — wait for hotspots
   const [submitting, setSubmitting] = useState(false);
+  const [difficulty, setDifficulty] = useState(data.difficulty);
 
   useEffect(() => {
-    if (hotspots.length === 0) {
-      setLoadingH(true);
-      API.findHotspots(file, targetType, data.chain).then(r => {
-        setAutoHots(r);
-        if (r.hotspots?.length) setHotspots(r.hotspots);
-        setLoadingH(false);
-      }).catch(() => setLoadingH(false));
-    }
+    setLoadingH(true);
+    API.findHotspots(file, targetType, data.chain).then(r => {
+      setAutoHots(r);
+      if (r.hotspots?.length) setHotspots(r.hotspots);
+
+      // For proteins, re-score difficulty using hotspot binding site topology
+      // The initial score didn't have hotspot info — update it if PESTO succeeded
+      if (targetType === 'protein' && r.method === 'pesto' && r.details?.scores) {
+        const scores = Object.values(r.details.scores);
+        const maxScore = Math.max(...scores);
+        const highCount = scores.filter(s => s >= 0.7).length;
+        // Good binding site: high max score and multiple high-scoring residues
+        if (maxScore >= 0.8 && highCount >= 3) {
+          setDifficulty(d => ({
+            ...d,
+            factors: {
+              ...d.factors,
+              binding_site_topology: {
+                score: Math.max(10, (d.factors?.binding_site_topology?.score || 40) - 20),
+                value: null,
+                unit: null,
+                note: `PESTO: ${highCount} high-confidence hotspots (max score ${maxScore.toFixed(2)})`,
+              }
+            },
+            overall: Math.max(5, (d.overall || 50) - 15),
+            warnings: (d.warnings || []).filter(w => !w.includes('hotspot')),
+          }));
+        }
+      }
+      setLoadingH(false);
+    }).catch(() => setLoadingH(false));
   }, []);
 
   const score    = difficulty.overall || 0;
-  const grade    = difficulty.grade   || 'Unknown';
+  const grade    = score < 25 ? 'Easy' : score < 50 ? 'Medium' : score < 70 ? 'Hard' : 'Very Hard';
   const gradeCol = grade === 'Easy' ? 'var(--green)' : grade === 'Medium' ? 'var(--amber)' :
                    grade === 'Hard' ? '#FF8C42' : 'var(--red)';
 
@@ -1911,6 +1948,28 @@ function DifficultyPage({ data, onBack, onSubmit }) {
 
   return (
     <div className="difficulty-page">
+      {/* Loading overlay while hotspot analysis runs */}
+      {loadingH && (
+        <div style={{position:'fixed', inset:0, background:'rgba(11,22,40,0.85)',
+                     display:'flex', flexDirection:'column', alignItems:'center',
+                     justifyContent:'center', zIndex:200, gap:20}}>
+          <div style={{width:56, height:56, border:'3px solid var(--grey-3)',
+                       borderTopColor:'var(--teal)', borderRadius:'50%',
+                       animation:'spin 0.7s linear infinite'}} />
+          <div style={{textAlign:'center'}}>
+            <div style={{fontFamily:'var(--font-display)', fontSize:18, fontWeight:600,
+                         color:'var(--white)', marginBottom:8}}>
+              {targetType === 'protein' ? 'Running PESTO analysis…' : 'Identifying binding features…'}
+            </div>
+            <div style={{fontSize:13, color:'var(--grey-2)'}}>
+              {targetType === 'protein'
+                ? 'Predicting protein binding interfaces with geometric deep learning'
+                : 'Identifying pharmacophoric features with RDKit'}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="hero-eyebrow" style={{marginBottom:12}}>Target analysis</div>
       <h1 className="page-title">Bindability assessment</h1>
       <p className="page-sub">
