@@ -1714,29 +1714,29 @@ function HotspotViewer({ file, chain, targetType, scores }) {
       return;
     }
 
-    // Defer initialization so the div is fully painted and has dimensions
-    const timer = setTimeout(() => {
     const el = viewerRef.current;
-    if (!el) return;
+    let initialized = false;
+    let obs = null;
 
-    // Force explicit dimensions so 3Dmol canvas renders correctly
-    el.style.width    = '100%';
-    el.style.height   = '280px';
-    el.style.position = 'relative';
+    function initViewer() {
+      if (initialized) return;
+      const rect = el.getBoundingClientRect();
+      const w    = rect.width;
+      const h    = rect.height || 280;
+      if (w < 10) return; // not painted yet
 
-    if (glRef.current) { try { glRef.current.clear(); } catch(e) {} }
+      initialized = true;
+      if (obs) obs.disconnect();
 
-    // Use explicit pixel dimensions
-    const w = el.getBoundingClientRect().width || 600;
-    const h = 280;
+      if (glRef.current) { try { glRef.current.clear(); } catch(e) {} }
 
-    const viewer = window.$3Dmol.createViewer(el, {
-      backgroundColor: 0x0B1628,
-      antialias: true,
-      width:  w,
-      height: h,
-    });
-    glRef.current = viewer;
+      const viewer = window.$3Dmol.createViewer(el, {
+        backgroundColor: 0x0B1628,
+        antialias: true,
+        width:  w,
+        height: h,
+      });
+      glRef.current = viewer;
 
     const filename = file.name || file.filename || '';
     const hasScores = scores && Object.keys(scores).length > 0;
@@ -1824,11 +1824,19 @@ function HotspotViewer({ file, chain, targetType, scores }) {
       }
     }
 
-    loadStructure();
-    }, 150); // delay ensures div is painted
+      loadStructure();
+    } // end initViewer
+
+    // Use ResizeObserver to detect when div has real dimensions
+    if (window.ResizeObserver) {
+      obs = new ResizeObserver(() => initViewer());
+      obs.observe(el);
+    }
+    // Also try immediately in case div is already sized
+    initViewer();
 
     return () => {
-      clearTimeout(timer);
+      if (obs) obs.disconnect();
       try { if (glRef.current) glRef.current.clear(); } catch(e) {}
     };
   }, [file, chain, scores]);
