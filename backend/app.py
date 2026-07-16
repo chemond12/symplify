@@ -721,26 +721,38 @@ def structure_with_hotspots():
 @app.route("/api/find-hotspots", methods=["POST"])
 def find_hotspots():
     """Identify hotspots/binding features for a target."""
-    if "file" not in request.files:
+    tmp_path = None
+
+    # Handle JSON body (pre-fetched file) or multipart form (uploaded file)
+    if request.is_json:
+        data        = request.get_json()
+        file_path   = data.get("file_path")
+        target_type = data.get("target_type", "protein")
+        chain       = data.get("chain", "A")
+        if not file_path or not Path(file_path).exists():
+            return jsonify({"error": "File not found"}), 400
+        tmp_path    = None
+        use_path    = file_path
+    elif "file" in request.files:
+        f           = request.files["file"]
+        target_type = request.form.get("target_type", "protein")
+        chain       = request.form.get("chain", "A")
+        filename    = secure_filename(f.filename)
+        tmp_path    = UPLOAD_DIR / f"tmp_{filename}"
+        f.save(str(tmp_path))
+        use_path    = str(tmp_path)
+    else:
         return jsonify({"error": "No file uploaded"}), 400
-
-    f           = request.files["file"]
-    target_type = request.form.get("target_type", "protein")
-    chain       = request.form.get("chain", "A")
-
-    filename = secure_filename(f.filename)
-    tmp_path = UPLOAD_DIR / f"tmp_{filename}"
-    f.save(str(tmp_path))
 
     try:
         if target_type == "protein":
             result = find_protein_hotspots(
-                str(tmp_path), chain,
+                use_path, chain,
                 pesto_dir=CFG.get("paths", {}).get("pesto_dir"),
                 pesto_env=CFG.get("environments", {}).get("pesto", "pesto"),
             )
         else:
-            result = find_small_molecule_features(str(tmp_path))
+            result = find_small_molecule_features(use_path)
 
         return jsonify({
             "hotspots":   result.hotspots,
@@ -751,8 +763,8 @@ def find_hotspots():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
+        if tmp_path and Path(str(tmp_path)).exists():
+            Path(str(tmp_path)).unlink()
 
 
 # ---------------------------------------------------------------------------
