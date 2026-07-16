@@ -1755,21 +1755,21 @@ function HotspotViewer({ file, chain, targetType, scores }) {
             });
           }
         } else {
-          // Small molecule — base style
+          // Small molecule — base stick style for all atoms
           viewer.setStyle({}, {
             stick: { colorscheme: 'Jmol', radius: 0.12 },
           });
 
-          // Highlight pharmacophoric hotspot atoms
+          // Highlight pharmacophoric hotspot atoms with teal color
           const topAtoms = (scores && scores.top_atoms) ? scores.top_atoms : [];
-          console.log('[Viewer] topAtoms:', topAtoms);
           if (topAtoms.length > 0) {
-            // Try both serial and index selectors since format varies
-            // RDKit 0-based indices → try as-is and +1
             topAtoms.forEach(idx => {
               viewer.setStyle(
                 { serial: idx + 1 },
-                { sphere: { color: '#00C2B2', radius: 0.6 } }
+                {
+                  stick:  { color: '#00C2B2', radius: 0.18 },
+                  sphere: { color: '#00C2B2', radius: 0.32 },
+                }
               );
             });
           }
