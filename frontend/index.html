@@ -1718,12 +1718,17 @@ function HotspotViewer({ file, chain, targetType, scores }) {
     let initialized = false;
     let obs = null;
 
+    // Set explicit dimensions on element BEFORE creating viewer
+    el.style.width    = '100%';
+    el.style.height   = '280px';
+    el.style.display  = 'block';
+
     function initViewer() {
       if (initialized) return;
-      const rect = el.getBoundingClientRect();
-      const w    = rect.width;
-      const h    = rect.height || 280;
-      if (w < 10) return; // not painted yet
+      // Force a layout reflow to get real dimensions
+      const w = el.offsetWidth || el.parentElement?.offsetWidth || 600;
+      const h = 280;
+      if (w < 10) return;
 
       initialized = true;
       if (obs) obs.disconnect();
