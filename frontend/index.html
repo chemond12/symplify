@@ -1708,10 +1708,18 @@ function HotspotViewer({ file, chain, targetType, scores }) {
 
     async function loadStructure() {
       try {
-        // Always fetch as raw structure first
         const r = await fetch(`/api/structure/${filename}`);
-        if (!r.ok) throw new Error('Failed to fetch structure');
+        if (!r.ok) {
+          setError(`Structure not found (${r.status})`);
+          setLoading(false);
+          return;
+        }
         const text = await r.text();
+        if (!text || text.trim().length < 10) {
+          setError('Empty structure file');
+          setLoading(false);
+          return;
+        }
 
         // Detect format — CIF files get converted to SDF by backend
         const isCif = filename.endsWith('.cif') || filename.endsWith('.cif.gz');
