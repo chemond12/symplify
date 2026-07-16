@@ -73,6 +73,7 @@ def _detect_ligand_resnum(pdb_path: str) -> str:
     except Exception:
         pass
     return "1"
+class PipelineRouter:
     def __init__(self, cfg):
         self.cfg       = cfg
         self.scheduler = get_scheduler(cfg["scheduler"])
