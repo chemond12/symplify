@@ -229,6 +229,12 @@ def find_small_molecule_features(structure_path: str,
                         break
             if smiles:
                 mol = Chem.MolFromSmiles(smiles)
+                if mol:
+                    # Generate 3D conformer (required for pharmacophore features)
+                    mol = Chem.AddHs(mol)
+                    AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+                    AllChem.MMFFOptimizeMolecule(mol)
+                    mol = Chem.RemoveHs(mol)
         elif path.endswith(".pdb"):
             mol = Chem.MolFromPDBFile(path, sanitize=False, removeHs=False)
             if mol:
