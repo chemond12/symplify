@@ -1,2 +1,5 @@
 config.yaml
 config.yaml
+symplify.db
+uploads/
+frontend/dist/
