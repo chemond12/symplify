@@ -89,7 +89,13 @@ def run_pesto(pdb_path: str, chain: str, out_path: str,
 
     with pt.no_grad():
         for subunits, filepath in dataset:
-            structure = concatenate_chains(subunits)
+            # Filter to only the target chain before running PESTO
+            # Running on all chains predicts chain-chain interfaces, not binding sites
+            target_subunits = {k: v for k, v in subunits.items()
+                               if k == chain or k.startswith(f"{chain}:")}
+            if not target_subunits:
+                target_subunits = subunits  # fallback if chain not found
+            structure = concatenate_chains(target_subunits)
 
             X, M = encode_structure(structure)
             q = encode_features(structure)[0]
