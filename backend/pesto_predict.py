@@ -122,7 +122,9 @@ def run_pesto(pdb_path: str, chain: str, out_path: str,
     # Cluster the above-threshold residues into spatial patches (epitopes)
     above       = [r for r in residue_scores if r["score"] >= threshold]
     clusters    = _cluster_residues(above, coords, dist=8.0)
-    recommended = clusters[0]["residues"][:5] if clusters else []   # best patch
+    score_by_id = {r["res_id_str"]: r["score"] for r in residue_scores}
+    recommended = (_compact_epitope(clusters[0]["residues"], score_by_id, coords)
+                  if clusters else [])
 
     result = {
         "residues":  residue_scores,
@@ -243,6 +245,28 @@ def _cluster_residues(residues, coords, dist=8.0):
         })
     clusters.sort(key=lambda c: c["total_score"], reverse=True)
     return clusters
+
+def _compact_epitope(res_ids, score_by_id, coords, radius=12.0, n=5):
+    """
+    From a set of residues, return up to n that form a spatially compact,
+    high-scoring core: seed at the highest-scoring residue, then add the
+    next-best residues within `radius` Å of the seed. This keeps the
+    recommended hotspots on one tight patch a single binder can engage.
+    """
+    ranked = sorted([r for r in res_ids if r in coords],
+                    key=lambda r: score_by_id.get(r, 0.0), reverse=True)
+    if not ranked:
+        return []
+    sx, sy, sz = coords[ranked[0]]
+    picked = [ranked[0]]
+    r2 = radius * radius
+    for r in ranked[1:]:
+        if len(picked) >= n:
+            break
+        x, y, z = coords[r]
+        if (x - sx) ** 2 + (y - sy) ** 2 + (z - sz) ** 2 <= r2:
+            picked.append(r)
+    return picked
 
 
 # ---------------------------------------------------------------------------
