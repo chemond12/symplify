@@ -1847,6 +1847,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
   const [autoHots,   setAutoHots]   = useState(null);
   const [loadingH,   setLoadingH]   = useState(true);  // start true — wait for hotspots
   const [submitting, setSubmitting] = useState(false);
+  const [showAll,    setShowAll]    = useState(false);
   const [difficulty, setDifficulty] = useState(data.difficulty);
 
   useEffect(() => {
@@ -2059,6 +2060,29 @@ function DifficultyPage({ data, onBack, onSubmit }) {
         </div>
       )}
 
+      {autoHots?.method === 'pesto' && autoHots.hotspots?.length > hotspots.length && !loadingH && (
+        <div style={{marginBottom:12}}>
+          <button className="advanced-toggle" onClick={() => setShowAll(v => !v)}>
+            {showAll ? '▾ Hide full list' : `▸ Show all ${autoHots.hotspots.length} PeSTo residues`}
+          </button>
+          {showAll && (
+            <div className="tag-list" style={{marginTop:6}}>
+              {autoHots.hotspots.map(h => {
+                const on = hotspots.includes(h);
+                const sc = autoHots.details?.scores?.[h];
+                return (
+                  <span key={h} className="tag"
+                        style={{cursor:'pointer', opacity: on ? 1 : 0.45,
+                                borderColor: on ? 'var(--teal)' : 'var(--grey-3)'}}
+                        onClick={() => setHotspots(hs => on ? hs.filter(x => x !== h) : [...hs, h])}>
+                    {h}{sc != null ? ` · ${sc.toFixed(2)}` : ''} {on ? '✓' : '+'}
+                  </span>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
       {autoHots?.details?.note && (
         <div className="hint" style={{marginBottom:20}}>{autoHots.details.note}</div>
       )}
