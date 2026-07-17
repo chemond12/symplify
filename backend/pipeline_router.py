@@ -147,8 +147,15 @@ class PipelineRouter:
             }
         }
         if hotspots:
-            rfd3_config[example_name]["select_buried"] = {h: "ALL" for h in hotspots}
-
+            # Hotspots for small molecules are atom names like ["C1", "C7"]
+            # → specify as atom list within the ligand chain key
+            # Hotspots for proteins are residue IDs — not used for RFD3
+            atom_names = [h for h in hotspots if len(h) <= 4 and h[0].isalpha()]
+            if atom_names:
+                rfd3_config[example_name]["select_buried"] = {ligand_key: atom_names}
+            else:
+                rfd3_config[example_name]["select_buried"] = {ligand_key: "ALL"}
+                
         rfd3_cfg_path = str(job_dir / "rfd3_config.json")
         with open(rfd3_cfg_path, "w") as f:
             json.dump(rfd3_config, f, indent=2)
