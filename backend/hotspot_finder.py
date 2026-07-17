@@ -113,6 +113,8 @@ def _run_pesto(pdb_path: str, chain: str, pesto_dir: str,
                     "note": ("PeSTo found no protein-interface residues above threshold. "
                              "Leave the hotspot field blank so BindCraft auto-selects "
                              "the binding mode?"),
+                    "clusters":          data.get("clusters", []),
+                    "recommended":       data.get("recommended", []),
                 }
             )
 

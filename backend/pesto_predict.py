@@ -111,24 +111,24 @@ def run_pesto(pdb_path: str, chain: str, out_path: str,
     if output_pdb is None or not Path(output_pdb).exists():
         raise RuntimeError("PESTO produced no output PDB")
 
-    # Parse b-factors from output PDB
-    residue_scores = _parse_bfactor_scores(output_pdb, chain)
-
-    # Call hotspots
-    hotspots = [
-        r["res_id_str"]
-        for r in residue_scores
-        if r["score"] >= threshold
-    ]
+    # Parse b-factors + CA coords from output PDB
+    residue_scores, coords = _parse_bfactor_scores(output_pdb, chain)
 
     # Sort hotspots by score descending, take top 20
     residue_scores.sort(key=lambda x: x["score"], reverse=True)
     hotspots_sorted = [r["res_id_str"] for r in residue_scores
                        if r["score"] >= threshold][:20]
 
+    # Cluster the above-threshold residues into spatial patches (epitopes)
+    above       = [r for r in residue_scores if r["score"] >= threshold]
+    clusters    = _cluster_residues(above, coords, dist=8.0)
+    recommended = clusters[0]["residues"][:5] if clusters else []   # best patch
+
     result = {
         "residues":  residue_scores,
         "hotspots":  hotspots_sorted,
+        "clusters":  clusters,
+        "recommended": recommended,
         "threshold": threshold,
         "method":    "pesto",
         "model":     "i_v4_1",
@@ -146,19 +146,22 @@ def run_pesto(pdb_path: str, chain: str, out_path: str,
     return result
 
 
-def _parse_bfactor_scores(pdb_path: str, target_chain: str) -> list:
+def _parse_bfactor_scores(pdb_path: str, target_chain: str):
     """
     Parse per-residue PESTO scores from b-factor field of output PDB.
-    Returns list of {chain, res_id, resname, score, res_id_str} dicts.
+    Returns (residues, coords):
+      residues : list of {chain, res_id, resname, score, res_id_str}
+      coords   : {res_id_str: (x, y, z)} from each residue's CA atom
     """
-    seen     = {}   # (chain, res_id) → max score across atoms
+    seen     = {}   # (chain, res_id) -> max score across atoms
     resnames = {}
+    coords   = {}   # res_id_str -> (x, y, z) of the CA atom
 
     with open(pdb_path) as f:
         for line in f:
             if not line.startswith(("ATOM", "HETATM")):
                 continue
-            chain   = line[21].strip()
+            chain = line[21].strip()
             if chain != target_chain:
                 continue
             try:
@@ -173,6 +176,13 @@ def _parse_bfactor_scores(pdb_path: str, target_chain: str) -> list:
                 seen[key]     = bfactor
                 resnames[key] = resname
 
+            if line[12:16].strip() == "CA":
+                try:
+                    coords[f"{chain}{res_id}"] = (
+                        float(line[30:38]), float(line[38:46]), float(line[46:54]))
+                except (ValueError, IndexError):
+                    pass
+
     results = []
     for (chain, res_id), score in sorted(seen.items(), key=lambda x: x[0][1]):
         results.append({
@@ -183,7 +193,56 @@ def _parse_bfactor_scores(pdb_path: str, target_chain: str) -> list:
             "res_id_str": f"{chain}{res_id}",
         })
 
-    return results
+    return results, coords
+
+def _cluster_residues(residues, coords, dist=8.0):
+    """
+    Group hotspot residues into spatial clusters (contiguous surface patches).
+    Two residues are linked if their CA atoms are within `dist` Å; connected
+    residues form one cluster. Returns clusters ranked best-first, where "best"
+    = highest summed PeSTo score (a real patch beats a lone high residue).
+    The top cluster is the recommended epitope for one BindCraft job.
+    """
+    pts = [r for r in residues if r["res_id_str"] in coords]
+    n = len(pts)
+    if n == 0:
+        return []
+
+    parent = list(range(n))
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    d2 = dist * dist
+    for i in range(n):
+        xi, yi, zi = coords[pts[i]["res_id_str"]]
+        for j in range(i + 1, n):
+            xj, yj, zj = coords[pts[j]["res_id_str"]]
+            if (xi - xj) ** 2 + (yi - yj) ** 2 + (zi - zj) ** 2 <= d2:
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[ri] = rj
+
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(pts[i])
+
+    clusters = []
+    for members in groups.values():
+        members.sort(key=lambda r: r["score"], reverse=True)
+        s = [r["score"] for r in members]
+        clusters.append({
+            "residues":    [r["res_id_str"] for r in members],
+            "top_residue": members[0]["res_id_str"],
+            "size":        len(members),
+            "total_score": round(sum(s), 3),
+            "mean_score":  round(sum(s) / len(s), 3),
+            "max_score":   round(max(s), 3),
+        })
+    clusters.sort(key=lambda c: c["total_score"], reverse=True)
+    return clusters
 
 
 # ---------------------------------------------------------------------------
