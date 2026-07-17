@@ -1854,7 +1854,8 @@ function DifficultyPage({ data, onBack, onSubmit }) {
     setLoadingH(true);
     API.findHotspots(file, targetType, data.chain).then(r => {
       setAutoHots(r);
-      if (r.hotspots?.length) setHotspots(r.hotspots.slice(0, 4));  // focused set — too many hotspots hurts BindCraft
+      if (r.details?.recommended?.length) setHotspots(r.details.recommended);  // focused set — too many hotspots hurts BindCraft
+      else if (r.hotspots?.length) setHotspots(r.hotspots.slice(0, 4));
 
       // For proteins, re-score difficulty using hotspot binding site topology
       // The initial score didn't have hotspot info — update it if PESTO succeeded
@@ -2081,6 +2082,34 @@ function DifficultyPage({ data, onBack, onSubmit }) {
               })}
             </div>
           )}
+        </div>
+      )}
+      {autoHots?.method === 'pesto' && autoHots.details?.clusters?.length > 1 && !loadingH && (
+        <div style={{marginBottom:16}}>
+          <div className="hint" style={{marginBottom:8}}>
+            PeSTo found {autoHots.details.clusters.length} distinct binding patches — a binder targets{' '}
+            <strong style={{color:'var(--teal)'}}>one patch</strong>. Pick an epitope below, or run a
+            separate job per patch.
+          </div>
+          {autoHots.details.clusters.map((c, i) => {
+            const sel    = c.residues.slice(0, 5);
+            const active = sel.length > 0 && sel.every(h => hotspots.includes(h));
+            return (
+              <div key={i} onClick={() => setHotspots(sel)}
+                   style={{cursor:'pointer', border:'1px solid',
+                           borderColor: active ? 'var(--teal)' : 'var(--grey-3)',
+                           background: active ? 'var(--teal-glow)' : 'transparent',
+                           borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:6}}>
+                <div style={{fontSize:12, color: active ? 'var(--teal)' : 'var(--grey-1)',
+                             fontFamily:'var(--font-mono)'}}>
+                  Patch {i + 1} · {c.size} residues · top {c.top_residue} ({c.max_score})
+                </div>
+                <div style={{fontSize:11, color:'var(--grey-2)', marginTop:3}}>
+                  {c.residues.slice(0, 8).join(', ')}{c.residues.length > 8 ? ' …' : ''}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
       {autoHots?.details?.note && (
