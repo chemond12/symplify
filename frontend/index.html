@@ -1755,8 +1755,24 @@ function HotspotViewer({ file, chain, targetType, scores }) {
             });
           }
         } else {
-          viewer.setStyle({}, { stick: { colorscheme: 'Jmol', radius: 0.15 },
-                                sphere: { colorscheme: 'Jmol', radius: 0.35 } });
+          // Small molecule — base stick style for all atoms
+          viewer.setStyle({}, {
+            stick: { colorscheme: 'Jmol', radius: 0.12 },
+          });
+
+          // Highlight pharmacophoric hotspot atoms with teal color
+          const topAtoms = (scores && scores.top_atoms) ? scores.top_atoms : [];
+          if (topAtoms.length > 0) {
+            topAtoms.forEach(idx => {
+              viewer.setStyle(
+                { serial: idx + 1 },
+                {
+                  stick:  { color: '#00C2B2', radius: 0.18 },
+                  sphere: { color: '#00C2B2', radius: 0.32 },
+                }
+              );
+            });
+          }
         }
 
         viewer.zoomTo();
@@ -1832,7 +1848,6 @@ function DifficultyPage({ data, onBack, onSubmit }) {
   const [loadingH,   setLoadingH]   = useState(true);  // start true — wait for hotspots
   const [submitting, setSubmitting] = useState(false);
   const [difficulty, setDifficulty] = useState(data.difficulty);
-  const [blankOk,    setBlankOk]    = useState(false);
 
   useEffect(() => {
     setLoadingH(true);
@@ -1875,7 +1890,6 @@ function DifficultyPage({ data, onBack, onSubmit }) {
 
   const circumference = 2 * Math.PI * 48;
   const offset        = circumference * (1 - score / 100);
-  const pestoNone = autoHots?.method === 'pesto_none' && hotspots.length === 0 && !blankOk;
 
   async function handleSubmit() {
     setSubmitting(true);
@@ -1993,7 +2007,10 @@ function DifficultyPage({ data, onBack, onSubmit }) {
           file={file}
           chain={data.chain}
           targetType={targetType}
-          scores={autoHots?.details?.scores || null}
+          scores={autoHots ? {
+            ...(autoHots.details?.scores || {}),
+            top_atoms: autoHots.details?.top_atoms || [],
+          } : null}
         />
       )}
 
@@ -2033,25 +2050,10 @@ function DifficultyPage({ data, onBack, onSubmit }) {
         <div className="hint" style={{marginBottom:20}}>{autoHots.details.note}</div>
       )}
 
-      {pestoNone && (
-        <div className="warnings-box" style={{marginBottom:20}}>
-          <h4>PeSTo found no hotspots</h4>
-          <p style={{fontSize:13, color:'var(--grey-1)', marginTop:4}}>
-            No protein-interface residues were found on this target. Leave the hotspot
-            field blank and let BindCraft auto-select the binding mode?
-          </p>
-          <div className="action-row" style={{marginTop:12}}>
-            <button className="btn-secondary" onClick={onBack}>No — add hotspots</button>
-            <button className="btn-primary" style={{width:'auto', padding:'10px 24px'}}
-                    onClick={() => setBlankOk(true)}>Yes — leave blank</button>
-          </div>
-        </div>
-      )}
-
       <div className="action-row">
         <button className="btn-secondary" onClick={onBack}>← Back</button>
         <button className="btn-primary" style={{width:'auto', padding:'12px 32px'}}
-                onClick={handleSubmit} disabled={submitting || pestoNone}>
+                onClick={handleSubmit} disabled={submitting}>
           {submitting ? <><Spinner /> &nbsp;Submitting…</> : 'Launch design run →'}
         </button>
       </div>
