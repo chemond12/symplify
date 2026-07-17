@@ -127,6 +127,8 @@ def _run_pesto(pdb_path: str, chain: str, pesto_dir: str,
                 "threshold":         data.get("threshold", 0.5),
                 "model":             data.get("model", "i_v4_1"),
                 "n_residues_scored": len(data.get("residues", [])),
+                "clusters":          data.get("clusters", []),
+                "recommended":       data.get("recommended", []),
             }
         )
     except Exception as e:
