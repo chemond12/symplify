@@ -1838,7 +1838,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
     setLoadingH(true);
     API.findHotspots(file, targetType, data.chain).then(r => {
       setAutoHots(r);
-      if (r.hotspots?.length) setHotspots(r.hotspots);
+      if (r.hotspots?.length) setHotspots(r.hotspots.slice(0, 4));  // focused set — too many hotspots hurts BindCraft
 
       // For proteins, re-score difficulty using hotspot binding site topology
       // The initial score didn't have hotspot info — update it if PESTO succeeded
@@ -2017,7 +2017,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
           {hotspots.length > 0
             ? hotspots.map(h => (
                 <span key={h} className="tag">
-                  {h}
+                  {h}{autoHots?.details?.scores?.[h] != null ? ` · ${autoHots.details.scores[h].toFixed(2)}` : ''}
                   <span className="tag-remove"
                         onClick={() => setHotspots(hs => hs.filter(x => x !== h))}>×</span>
                 </span>
@@ -2026,6 +2026,19 @@ function DifficultyPage({ data, onBack, onSubmit }) {
                 No {targetType === 'protein' ? 'hotspots' : 'features'} specified — model will explore freely
               </span>
           }
+        </div>
+      )}
+
+      {autoHots?.method === 'pesto' && autoHots.hotspots?.length > 0 && !loadingH && (
+        <div className="hint" style={{marginBottom:8}}>
+          PeSTo scored {autoHots.hotspots.length} interface residues — the top {Math.min(4, autoHots.hotspots.length)} are
+          shown with their confidence. BindCraft works best with a{' '}
+          <strong style={{color:'var(--teal)'}}>focused set of 3–5</strong>; remove lower-scoring ones (×) to tighten it.
+          {hotspots.length > 6 && (
+            <span style={{color:'var(--amber)', display:'block', marginTop:4}}>
+              ⚠ {hotspots.length} selected is a lot — too many hotspots can prevent any designs from succeeding.
+            </span>
+          )}
         </div>
       )}
 
