@@ -36,6 +36,71 @@ import sys
 import tempfile
 from pathlib import Path
 
+def _cluster_hotspots(residue_scores: list, pdb_path: str,
+                       target_chain: str, radius: float = 8.0,
+                       min_score: float = 0.3) -> list:
+    """Cluster PESTO hotspot residues by 3D Cα distance using DBSCAN."""
+    try:
+        import numpy as np
+        from sklearn.cluster import DBSCAN
+    except ImportError:
+        return []
+
+    candidates = [r for r in residue_scores if r["score"] >= min_score]
+    if len(candidates) < 2:
+        return []
+
+    # Extract Cα coordinates from PDB
+    ca_coords = {}
+    with open(pdb_path, errors="ignore") as f:
+        for line in f:
+            if not line.startswith("ATOM"):
+                continue
+            atom_name = line[12:16].strip()
+            chain     = line[21].strip()
+            try:
+                res_id = int(line[22:26].strip())
+                x, y, z = float(line[30:38]), float(line[38:46]), float(line[46:54])
+            except ValueError:
+                continue
+            if atom_name == "CA" and chain == target_chain:
+                ca_coords[res_id] = np.array([x, y, z])
+
+    valid  = [r for r in candidates if r["res_id"] in ca_coords]
+    if len(valid) < 2:
+        return []
+
+    coords = np.array([ca_coords[r["res_id"]] for r in valid])
+    labels = DBSCAN(eps=radius, min_samples=2, metric="euclidean").fit(coords).labels_
+
+    clusters = {}
+    for i, label in enumerate(labels):
+        if label == -1:
+            continue
+        clusters.setdefault(label, []).append(valid[i])
+
+    if not clusters:
+        return []
+
+    result = []
+    for label, members in clusters.items():
+        scores   = [r["score"] for r in members]
+        centroid = np.mean([ca_coords[r["res_id"]] for r in members], axis=0)
+        result.append({
+            "cluster_id": int(label),
+            "residues":   [r["res_id_str"] for r in members],
+            "mean_score": round(float(np.mean(scores)), 3),
+            "max_score":  round(float(np.max(scores)), 3),
+            "size":       len(members),
+            "rank_score": round(float(np.mean(scores)) * len(members) ** 0.5, 3),
+            "centroid":   [round(float(c), 2) for c in centroid],
+        })
+
+    result.sort(key=lambda x: x["rank_score"], reverse=True)
+    for i, c in enumerate(result):
+        c["rank"] = i + 1
+
+    return result
 
 def run_pesto(pdb_path: str, chain: str, out_path: str,
               pesto_dir: str, threshold: float = 0.5,
@@ -132,11 +197,12 @@ def run_pesto(pdb_path: str, chain: str, out_path: str,
     recommended = (_compact_epitope(clusters[0]["residues"], score_by_id, coords)
                   if clusters else [])
 
+    clusters = _cluster_hotspots(residue_scores, pdb_path, target_chain=chain)
+
     result = {
         "residues":  residue_scores,
-        "hotspots":  hotspots_sorted,
+        "hotspots":  clusters[0]["residues"] if clusters else hotspots_sorted,
         "clusters":  clusters,
-        "recommended": recommended,
         "threshold": threshold,
         "method":    "pesto",
         "model":     "i_v4_1",
