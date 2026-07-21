@@ -550,11 +550,32 @@ def append_linkers(ranked: list, name_to_pdb: dict,
                 terminus        = "C",
                 repeats         = repeats,
             )
+            r["linker_pdb_path"] = str(out_path)
         except Exception as e:
             print(f"  [WARN] Linker append failed for {r['name']}: {e}")
 
     print(f"  Linker PDBs written to: {linker_dir}")
 
+def _save_results_to_db(db_path: str, job_id: str, ranked: list):
+    """Write final ranked designs into Symplify's `results` table."""
+    import sqlite3, json, time
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("DELETE FROM results WHERE job_id=?", (job_id,))
+        for r in ranked:
+            conn.execute(
+                """INSERT INTO results
+                   (job_id, rank, design_name, pdb_path, linker_pdb_path, metrics)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (job_id, r.get("rank"), r.get("name"),
+                 r.get("pdb_path"), r.get("linker_pdb_path"),
+                 json.dumps({k: v for k, v in r.items()
+                             if k not in ("pdb_path", "linker_pdb_path")}))
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    print(f"[pipeline_rfd3] {len(ranked)} results written to DB for job {job_id}")
 
 # ---------------------------------------------------------------------------
 # Summary report
@@ -628,6 +649,13 @@ def main():
                         help="Skip LigandMPNN (use existing outputs)")
     parser.add_argument("--skip_rf3",          action="store_true",
                         help="Skip RF3 scoring (use existing all_results.json)")
+    parser.add_argument("--stop_after",        default="",   choices=["", "mpnn", "rf3"],
+                        help="Exit after this stage — used to split the pipeline "
+                             "across separate SLURM jobs. Empty = run to completion.")
+    parser.add_argument("--job_id",  default="", 
+                        help="Symplify job ID (for DB write)")
+    parser.add_argument("--db_path", default="", 
+                        help="Path to symplify.db (for DB write)")
     args = parser.parse_args()
 
     t_start    = time.time()
@@ -652,6 +680,10 @@ def main():
         mpnn_cifs = sorted(str(p) for p in
                             (output_dir / "mpnn_outputs").rglob("*.cif"))
 
+    if args.stop_after == "mpnn":
+        print("\n[pipeline_rfd3] --stop_after mpnn set — exiting before RF3 scoring.")
+        return
+
     # Stage 3: RF3 scoring
     if not args.skip_rf3:
         rf3_results = run_rf3_scoring(mpnn_cifs, output_dir)
@@ -659,6 +691,10 @@ def main():
         print("\n[Stage 3] Skipping RF3 (loading existing all_results.json)")
         with open(output_dir / "rf3_outputs" / "all_results.json") as f:
             rf3_results = json.load(f)
+
+    if args.stop_after == "rf3":
+        print("\n[pipeline_rfd3] --stop_after rf3 set — exiting before ranking/post-processing.")
+        return
 
     # Stage 4: Hard filter
     survivors, failing = apply_rf3_filters(
@@ -683,9 +719,14 @@ def main():
 
     # Stage 8: Rank + CSV
     ranked = rank_and_write(survivors, failing, output_dir)
+    for r in ranked:
+        r["pdb_path"] = name_to_pdb.get(r["name"])
 
     # Stage 9: Linker
     append_linkers(ranked, name_to_pdb, output_dir, args.linker_repeats)
+
+    if args.job_id and args.db_path and Path(args.db_path).exists():
+        _save_results_to_db(args.db_path, args.job_id, ranked)
 
     # Summary
     elapsed = time.time() - t_start
