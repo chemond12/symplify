@@ -880,7 +880,11 @@
     align-items: start;
   }
 
-  .results-list { }
+  .results-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
 
   .results-header {
     display: flex;
@@ -2016,7 +2020,68 @@ function DifficultyPage({ data, onBack, onSubmit }) {
         />
       )}
 
-      {/* Hotspots */}
+      {/* Cluster selector for proteins */}
+      {targetType === 'protein' && autoHots?.details?.clusters?.length > 0 && (
+        <div style={{marginBottom:24}}>
+          <div className="section-label" style={{marginBottom:12}}>
+            Binding site clusters
+            <span style={{marginLeft:8, fontWeight:400, textTransform:'none',
+                          color:'var(--grey-2)', fontSize:11}}>
+              ranked by PESTO score × coverage
+            </span>
+          </div>
+          {autoHots.details.clusters.map((cluster, i) => (
+            <div key={cluster.cluster_id}
+                 onClick={() => setHotspots(cluster.residues)}
+                 style={{
+                   background: JSON.stringify(hotspots) === JSON.stringify(cluster.residues)
+                     ? 'var(--teal-glow)' : 'var(--navy-mid)',
+                   border: '1px solid ' + (JSON.stringify(hotspots) === JSON.stringify(cluster.residues) ? 'var(--teal)' : 'var(--grey-3)'),
+                   borderRadius: 'var(--radius)',
+                   padding: '14px 16px',
+                   marginBottom: 8,
+                   cursor: 'pointer',
+                   transition: 'all 0.15s',
+                 }}>
+              <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:6}}>
+                <div style={{display:'flex', alignItems:'center', gap:10}}>
+                  {i === 0 && (
+                    <span style={{background:'var(--teal)', color:'var(--navy)',
+                                  fontSize:10, fontFamily:'var(--font-mono)',
+                                  padding:'2px 8px', borderRadius:4, fontWeight:700}}>
+                      RECOMMENDED
+                    </span>
+                  )}
+                  <span style={{fontFamily:'var(--font-display)', fontWeight:600, fontSize:14}}>
+                    Cluster {cluster.rank}
+                  </span>
+                  <span style={{color:'var(--grey-2)', fontSize:12}}>
+                    {cluster.size} residues
+                  </span>
+                </div>
+                <div style={{textAlign:'right'}}>
+                  <div style={{fontFamily:'var(--font-mono)', fontSize:13,
+                               color: cluster.mean_score > 0.7 ? 'var(--teal)' :
+                                      cluster.mean_score > 0.5 ? 'var(--amber)' : 'var(--grey-2)'}}>
+                    {cluster.mean_score.toFixed(2)} mean · {cluster.max_score.toFixed(2)} max
+                  </div>
+                </div>
+              </div>
+              <div className="tag-list" style={{marginBottom:0}}>
+                {cluster.residues.slice(0, 10).map(r => (
+                  <span key={r} className="tag" style={{fontSize:10, padding:'1px 6px'}}>{r}</span>
+                ))}
+                {cluster.residues.length > 10 && (
+                  <span style={{fontSize:11, color:'var(--grey-2)'}}>
+                    +{cluster.residues.length - 10} more
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="section-label" style={{marginTop:8}}>
         {targetType === 'protein' ? 'Hotspot residues' : 'Target binding features'}
         {autoHots && (

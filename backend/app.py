@@ -339,7 +339,7 @@ def analyze_structure():
 
     f        = request.files["file"]
     filename = secure_filename(f.filename)
-    tmp_path = UPLOAD_DIR / f"tmp_analyze_{filename}"
+    tmp_path = UPLOAD_DIR / filename
     f.save(str(tmp_path))
 
     try:
@@ -347,9 +347,7 @@ def analyze_structure():
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
+    
 
 
 def _analyze_structure(pdb_path: str) -> dict:

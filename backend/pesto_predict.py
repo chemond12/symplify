@@ -36,6 +36,51 @@ import sys
 import tempfile
 from pathlib import Path
 
+def _cluster_hotspots(residue_scores: list, coords: dict,
+                       radius: float = 8.0, min_score: float = 0.3) -> list:
+    """Cluster PESTO hotspot residues by 3D Ca distance using DBSCAN."""
+    try:
+        import numpy as np
+        from sklearn.cluster import DBSCAN
+    except ImportError:
+        return []
+
+    candidates = [r for r in residue_scores if r["score"] >= min_score]
+    valid = [r for r in candidates if r["res_id_str"] in coords]
+    if len(valid) < 2:
+        return []
+
+    coord_arr = np.array([coords[r["res_id_str"]] for r in valid])
+    labels = DBSCAN(eps=radius, min_samples=2, metric="euclidean").fit(coord_arr).labels_
+
+    clusters = {}
+    for i, label in enumerate(labels):
+        if label == -1:
+            continue
+        clusters.setdefault(label, []).append(valid[i])
+
+    if not clusters:
+        return []
+
+    result = []
+    for label, members in clusters.items():
+        scores   = [r["score"] for r in members]
+        centroid = np.mean([coords[r["res_id_str"]] for r in members], axis=0)
+        result.append({
+            "cluster_id": int(label),
+            "residues":   [r["res_id_str"] for r in members],
+            "mean_score": round(float(np.mean(scores)), 3),
+            "max_score":  round(float(np.max(scores)), 3),
+            "size":       len(members),
+            "rank_score": round(float(np.mean(scores)) * len(members) ** 0.5, 3),
+            "centroid":   [round(float(c), 2) for c in centroid],
+        })
+
+    result.sort(key=lambda x: x["rank_score"], reverse=True)
+    for i, c in enumerate(result):
+        c["rank"] = i + 1
+
+    return result
 
 def run_pesto(pdb_path: str, chain: str, out_path: str,
               pesto_dir: str, threshold: float = 0.5,
@@ -89,7 +134,13 @@ def run_pesto(pdb_path: str, chain: str, out_path: str,
 
     with pt.no_grad():
         for subunits, filepath in dataset:
-            structure = concatenate_chains(subunits)
+            # Filter to only the target chain before running PESTO
+            # Running on all chains predicts chain-chain interfaces, not binding sites
+            target_subunits = {k: v for k, v in subunits.items()
+                               if k == chain or k.startswith(f"{chain}:")}
+            if not target_subunits:
+                target_subunits = subunits  # fallback if chain not found
+            structure = concatenate_chains(target_subunits)
 
             X, M = encode_structure(structure)
             q = encode_features(structure)[0]
@@ -108,9 +159,6 @@ def run_pesto(pdb_path: str, chain: str, out_path: str,
             save_pdb(split_by_chain(structure), tmp_pdb)
             output_pdb = tmp_pdb
 
-    if output_pdb is None or not Path(output_pdb).exists():
-        raise RuntimeError("PESTO produced no output PDB")
-
     # Parse b-factors + CA coords from output PDB
     residue_scores, coords = _parse_bfactor_scores(output_pdb, chain)
 
@@ -119,18 +167,12 @@ def run_pesto(pdb_path: str, chain: str, out_path: str,
     hotspots_sorted = [r["res_id_str"] for r in residue_scores
                        if r["score"] >= threshold][:20]
 
-    # Cluster the above-threshold residues into spatial patches (epitopes)
-    above       = [r for r in residue_scores if r["score"] >= threshold]
-    clusters    = _cluster_residues(above, coords, dist=8.0)
-    score_by_id = {r["res_id_str"]: r["score"] for r in residue_scores}
-    recommended = (_compact_epitope(clusters[0]["residues"], score_by_id, coords)
-                  if clusters else [])
+    clusters = _cluster_hotspots(residue_scores, coords)
 
     result = {
         "residues":  residue_scores,
-        "hotspots":  hotspots_sorted,
+        "hotspots":  clusters[0]["residues"] if clusters else hotspots_sorted,
         "clusters":  clusters,
-        "recommended": recommended,
         "threshold": threshold,
         "method":    "pesto",
         "model":     "i_v4_1",
@@ -196,77 +238,6 @@ def _parse_bfactor_scores(pdb_path: str, target_chain: str):
         })
 
     return results, coords
-
-def _cluster_residues(residues, coords, dist=8.0):
-    """
-    Group hotspot residues into spatial clusters (contiguous surface patches).
-    Two residues are linked if their CA atoms are within `dist` Å; connected
-    residues form one cluster. Returns clusters ranked best-first, where "best"
-    = highest summed PeSTo score (a real patch beats a lone high residue).
-    The top cluster is the recommended epitope for one BindCraft job.
-    """
-    pts = [r for r in residues if r["res_id_str"] in coords]
-    n = len(pts)
-    if n == 0:
-        return []
-
-    parent = list(range(n))
-    def find(i):
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    d2 = dist * dist
-    for i in range(n):
-        xi, yi, zi = coords[pts[i]["res_id_str"]]
-        for j in range(i + 1, n):
-            xj, yj, zj = coords[pts[j]["res_id_str"]]
-            if (xi - xj) ** 2 + (yi - yj) ** 2 + (zi - zj) ** 2 <= d2:
-                ri, rj = find(i), find(j)
-                if ri != rj:
-                    parent[ri] = rj
-
-    groups = {}
-    for i in range(n):
-        groups.setdefault(find(i), []).append(pts[i])
-
-    clusters = []
-    for members in groups.values():
-        members.sort(key=lambda r: r["score"], reverse=True)
-        s = [r["score"] for r in members]
-        clusters.append({
-            "residues":    [r["res_id_str"] for r in members],
-            "top_residue": members[0]["res_id_str"],
-            "size":        len(members),
-            "total_score": round(sum(s), 3),
-            "mean_score":  round(sum(s) / len(s), 3),
-            "max_score":   round(max(s), 3),
-        })
-    clusters.sort(key=lambda c: c["total_score"], reverse=True)
-    return clusters
-
-def _compact_epitope(res_ids, score_by_id, coords, radius=12.0, n=5):
-    """
-    From a set of residues, return up to n that form a spatially compact,
-    high-scoring core: seed at the highest-scoring residue, then add the
-    next-best residues within `radius` Å of the seed. This keeps the
-    recommended hotspots on one tight patch a single binder can engage.
-    """
-    ranked = sorted([r for r in res_ids if r in coords],
-                    key=lambda r: score_by_id.get(r, 0.0), reverse=True)
-    if not ranked:
-        return []
-    sx, sy, sz = coords[ranked[0]]
-    picked = [ranked[0]]
-    r2 = radius * radius
-    for r in ranked[1:]:
-        if len(picked) >= n:
-            break
-        x, y, z = coords[r]
-        if (x - sx) ** 2 + (y - sy) ** 2 + (z - sz) ** 2 <= r2:
-            picked.append(r)
-    return picked
 
 
 # ---------------------------------------------------------------------------

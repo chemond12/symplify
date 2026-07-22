@@ -306,6 +306,26 @@ def passes_filters(row: dict) -> tuple[bool, str]:
             return False, f"{col}={val:.3f} > {threshold}"
     return True, ""
 
+def _save_results_to_db(db_path: str, job_id: str, ranked: list):
+    """Write final ranked designs into Symplify's `results` table."""
+    import sqlite3, json, time
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("DELETE FROM results WHERE job_id=?", (job_id,))
+        for r in ranked:
+            conn.execute(
+                """INSERT INTO results
+                   (job_id, rank, design_name, pdb_path, linker_pdb_path, metrics)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (job_id, r.get("rank"), r.get("design"),
+                 r.get("pdb_path"), r.get("linker_pdb_path"),
+                 json.dumps({k: v for k, v in r.items()
+                             if k not in ("pdb_path", "linker_pdb_path")}))
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    print(f"[pipeline_bindcraft] {len(ranked)} results written to DB for job {job_id}")
 
 # ---------------------------------------------------------------------------
 # CSV output
@@ -392,6 +412,8 @@ def main():
     parser.add_argument("--skip_min_ipae",      action="store_true",
                         help="Skip min ipAE re-prediction (faster, loses that metric)")
     parser.add_argument("--workers",            default=8,     type=int)
+    parser.add_argument("--job_id",  default="", help="Symplify job ID (for DB write)")
+    parser.add_argument("--db_path", default="", help="Path to symplify.db (for DB write)")
     args = parser.parse_args()
 
     t_start = time.time()
@@ -543,6 +565,7 @@ def main():
 
         dest = passing_dir / pdb.name
         shutil.copy2(pdb, dest)
+        row["pdb_path"] = str(dest)
 
         linker_out = linker_dir / pdb.name
         try:
@@ -553,6 +576,7 @@ def main():
                 terminus        = "C",
                 repeats         = args.linker_repeats,
             )
+            row["linker_pdb_path"] = str(linker_out)
         except Exception as e:
             print(f"  [WARN] Linker append failed for {pdb.name}: {e}")
 
@@ -568,6 +592,9 @@ def main():
     print(f"  {len(passing_rows)} designs passed → {csv_out}")
     print(f"  Linker PDBs → {linker_dir}")
     print(f"{'='*50}")
+
+    if args.job_id and args.db_path and Path(args.db_path).exists():
+        _save_results_to_db(args.db_path, args.job_id, passing_rows)
 
 
 if __name__ == "__main__":

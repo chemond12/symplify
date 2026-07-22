@@ -147,7 +147,14 @@ class PipelineRouter:
             }
         }
         if hotspots:
-            rfd3_config[example_name]["select_buried"] = {h: "ALL" for h in hotspots}
+            # Hotspots for small molecules are atom names like ["C1", "C7"]
+            # → specify as atom list within the ligand chain key
+            # Hotspots for proteins are residue IDs — not used for RFD3
+            atom_names = [h for h in hotspots if len(h) <= 4 and h[0].isalpha()]
+            if atom_names:
+                rfd3_config[example_name]["select_buried"] = {ligand_key: atom_names}
+            else:
+                rfd3_config[example_name]["select_buried"] = {ligand_key: "ALL"}
 
         rfd3_cfg_path = str(job_dir / "rfd3_config.json")
         with open(rfd3_cfg_path, "w") as f:
@@ -272,7 +279,7 @@ class PipelineRouter:
         # Job 3: full RFD3 + LigandMPNN
         spec3 = JobSpec(
             name        = f"sym_{job_id[:8]}_gen",
-            command     = base_cmd + " --skip_rf3",
+            command     = base_cmd + " --skip_rf3 --stop_after mpnn",
             log_dir     = log_dir,
             gpus        = res.get("rfd3_generation", {}).get("gpus", 1),
             cpus        = res.get("rfd3_generation", {}).get("cpus", 8),
@@ -289,7 +296,7 @@ class PipelineRouter:
         # Job 4: full RF3 scoring
         spec4 = JobSpec(
             name        = f"sym_{job_id[:8]}_rf3",
-            command     = base_cmd + " --skip_rfd3 --skip_mpnn",
+            command     = base_cmd + " --skip_rfd3 --skip_mpnn --stop_after rf3",
             log_dir     = log_dir,
             gpus        = res.get("rf3_scoring", {}).get("gpus", 1),
             cpus        = res.get("rf3_scoring", {}).get("cpus", 8),
@@ -301,14 +308,13 @@ class PipelineRouter:
             module_load = module,
         )
         jid4 = self.scheduler.submit(spec4)
-        db.update_stage(job_id, "ligandmpnn",  "pending")
-        db.update_stage(job_id, "rf3_scoring", "pending",
-                         scheduler_id=jid4)
+        db.update_stage(job_id, "rf3_scoring", "pending", scheduler_id=jid4)
 
         # Job 5: post-processing (terminus + Rosetta + rank + linker)
         spec5 = JobSpec(
             name        = f"sym_{job_id[:8]}_post",
-            command     = base_cmd + " --skip_rfd3 --skip_mpnn --skip_rf3",
+            command     = (base_cmd + " --skip_rfd3 --skip_mpnn --skip_rf3"
+                           f" --job_id {job_id} --db_path {self.db_path}"),
             log_dir     = log_dir,
             gpus        = 0,
             cpus        = res.get("post_processing", {}).get("cpus", 32),
@@ -377,6 +383,7 @@ class PipelineRouter:
             f"--binder_chain B "
             f"--linker_repeats {linker_rep} "
             f"--skip_min_ipae "
+            f"--job_id {job_id} --db_path {self.db_path} "
             f"--workers ${{SLURM_CPUS_PER_TASK:-16}}"
         )
         spec2 = JobSpec(
