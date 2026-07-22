@@ -104,6 +104,8 @@ class SLURMScheduler(BaseScheduler):
             f"#SBATCH --time={spec.hours:02d}:00:00",
             f"#SBATCH --partition={partition}",
         ]
+        if partition:
+            header.append(f"#SBATCH --partition={partition}")
         if spec.gpus > 0:
             header.append(f"#SBATCH --gres=gpu:{spec.gpus}")
         if self.account:
