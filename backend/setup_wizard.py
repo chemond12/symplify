@@ -33,7 +33,13 @@ except ImportError:  # pragma: no cover
     yaml = None
 
 HERE = Path(__file__).resolve().parent
-CONFIG = HERE / "config.yaml"
+def _find_config():
+    for d in (HERE, *HERE.parents):
+        c = d / "config.yaml"
+        if c.exists():
+            return c
+    return HERE / "config.yaml"
+CONFIG = _find_config()
 
 # --------------------------------------------------------------------------- #
 #  Pretty output
