@@ -94,8 +94,10 @@ def _run_pesto(pdb_path: str, chain: str, pesto_dir: str,
         Path(out_path).unlink(missing_ok=True)
 
         hotspots = data.get("hotspots", [])
-        scores = {r["res_id_str"]: r["score"]
-                  for r in data.get("residues", [])}
+        scores   = {r["res_id_str"]: r["score"]
+                    for r in data.get("residues", [])}
+        resnames = {r["res_id_str"]: r["resname"]
+                    for r in data.get("residues", [])}
 
         if not hotspots:
             # PeSTo ran fine but found NO interface residues above threshold
@@ -108,6 +110,7 @@ def _run_pesto(pdb_path: str, chain: str, pesto_dir: str,
                 confidence = "none",
                 details    = {
                     "scores":    scores,
+                    "resnames":  resnames,
                     "threshold": data.get("threshold", 0.5),
                     "prompt":    "leave_blank",
                     "note": ("PeSTo found no protein-interface residues above threshold. "
@@ -124,6 +127,7 @@ def _run_pesto(pdb_path: str, chain: str, pesto_dir: str,
             confidence = "high",
             details    = {
                 "scores":            scores,
+                "resnames":          resnames,
                 "clusters":          data.get("clusters", []),
                 "threshold":         data.get("threshold", 0.5),
                 "model":             data.get("model", "i_v4_1"),

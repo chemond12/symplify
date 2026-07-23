@@ -1704,7 +1704,21 @@ function UploadPage({ onNext }) {
 // ============================================================
 // Hotspot 3D viewer
 // ============================================================
-function HotspotViewer({ file, chain, targetType, scores }) {
+const AA3TO1 = {
+  ALA:'A', ARG:'R', ASN:'N', ASP:'D', CYS:'C', GLN:'Q', GLU:'E',
+  GLY:'G', HIS:'H', ILE:'I', LEU:'L', LYS:'K', MET:'M', PHE:'F',
+  PRO:'P', SER:'S', THR:'T', TRP:'W', TYR:'Y', VAL:'V',
+  SEC:'U', PYL:'O', MSE:'M', HSD:'H', HSE:'H', HSP:'H',
+};
+// Converts "A54" + a resnames map ({"A54":"MET"}) into "M54"
+function aaLabel(resIdStr, resnames, chain) {
+  const resname = resnames && resnames[resIdStr];
+  if (!resname) return resIdStr;
+  const code = AA3TO1[resname] || resname[0];
+  return `${code}${resIdStr.slice((chain || 'A').length)}`;
+}
+
+function HotspotViewer({ file, chain, targetType, scores, selected }) {
   const containerRef = useRef(null);
   const viewerRef    = useRef(null);
   const [status, setStatus] = useState('loading');
@@ -1758,6 +1772,50 @@ function HotspotViewer({ file, chain, targetType, scores }) {
                 viewer.setStyle({ chain, resi: resis }, { cartoon: { color }, stick: { radius: 0.1, color } });
             });
           }
+
+          // Highlight the currently selected hotspots/cluster in gold,
+          // drawn on top of the score-band coloring above so it's visible.
+          if (selected && selected.length > 0) {
+            const selResis = selected
+              .filter(r => r.startsWith(chain))
+              .map(r => parseInt(r.slice(chain.length)));
+            if (selResis.length > 0) {
+              viewer.setStyle(
+                { chain, resi: selResis },
+                {
+                  cartoon: { color: '#FFD447' },
+                  stick:   { radius: 0.22, color: '#FFD447' },
+                  sphere:  { radius: 0.4,  color: '#FFD447' },
+                }
+              );
+            }
+          }
+
+          // Hover tooltip: one-letter code + residue number
+          viewer.setHoverable(
+            { chain },
+            true,
+            (atom) => {
+              if (!atom.label) {
+                const code = AA3TO1[atom.resn] || atom.resn || '';
+                atom.label = viewer.addLabel(`${code}${atom.resi}`, {
+                  position: atom,
+                  backgroundColor: '#0B1628',
+                  backgroundOpacity: 0.85,
+                  fontColor: '#EAF2FF',
+                  fontSize: 12,
+                  borderColor: '#00C2B2',
+                  borderThickness: 1,
+                });
+              }
+            },
+            (atom) => {
+              if (atom.label) {
+                viewer.removeLabel(atom.label);
+                delete atom.label;
+              }
+            }
+          );
         } else {
           // Small molecule — base stick style for all atoms
           viewer.setStyle({}, {
@@ -1798,7 +1856,7 @@ function HotspotViewer({ file, chain, targetType, scores }) {
       try { viewer.clear(); } catch(e) {}
       if (container.contains(divEl)) container.removeChild(divEl);
     };
-  }, [file, chain, scores]);
+  }, [file, chain, scores, selected]);
 
   return (
     <div className="hotspot-viewer">
@@ -1832,6 +1890,9 @@ function HotspotViewer({ file, chain, targetType, scores }) {
               <span><span className="legend-swatch" style={{background:'#F5A623'}} />Medium (0.5+)</span>
               <span><span className="legend-swatch" style={{background:'#4ECDC4'}} />High (0.7+)</span>
               <span><span className="legend-swatch" style={{background:'#00C2B2'}} />Very high (0.85+)</span>
+              {selected && selected.length > 0 && (
+                <span><span className="legend-swatch" style={{background:'#FFD447'}} />Selected</span>
+              )}
             </>
           ) : (
             <span style={{color:'var(--grey-3)'}}>Running hotspot analysis…</span>
@@ -2013,6 +2074,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
           file={file}
           chain={data.chain}
           targetType={targetType}
+          selected={hotspots}
           scores={autoHots ? {
             ...(autoHots.details?.scores || {}),
             top_atoms: autoHots.details?.top_atoms || [],
@@ -2069,7 +2131,9 @@ function DifficultyPage({ data, onBack, onSubmit }) {
               </div>
               <div className="tag-list" style={{marginBottom:0}}>
                 {cluster.residues.slice(0, 10).map(r => (
-                  <span key={r} className="tag" style={{fontSize:10, padding:'1px 6px'}}>{r}</span>
+                  <span key={r} className="tag" style={{fontSize:10, padding:'1px 6px'}}>
+                    {aaLabel(r, autoHots?.details?.resnames, data.chain)}
+                  </span>
                 ))}
                 {cluster.residues.length > 10 && (
                   <span style={{fontSize:11, color:'var(--grey-2)'}}>
@@ -2101,7 +2165,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
           {hotspots.length > 0
             ? hotspots.map(h => (
                 <span key={h} className="tag">
-                  {h}{autoHots?.details?.scores?.[h] != null ? ` · ${autoHots.details.scores[h].toFixed(2)}` : ''}
+                  {aaLabel(h, autoHots?.details?.resnames, data.chain)}{autoHots?.details?.scores?.[h] != null ? ` · ${autoHots.details.scores[h].toFixed(2)}` : ''}
                   <span className="tag-remove"
                         onClick={() => setHotspots(hs => hs.filter(x => x !== h))}>×</span>
                 </span>
@@ -2142,7 +2206,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
                         style={{cursor:'pointer', opacity: on ? 1 : 0.45,
                                 borderColor: on ? 'var(--teal)' : 'var(--grey-3)'}}
                         onClick={() => setHotspots(hs => on ? hs.filter(x => x !== h) : [...hs, h])}>
-                    {h}{sc != null ? ` · ${sc.toFixed(2)}` : ''} {on ? '✓' : '+'}
+                    {aaLabel(h, autoHots?.details?.resnames, data.chain)}{sc != null ? ` · ${sc.toFixed(2)}` : ''} {on ? '✓' : '+'}
                   </span>
                 );
               })}
