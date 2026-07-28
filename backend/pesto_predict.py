@@ -36,13 +36,54 @@ import sys
 import tempfile
 from pathlib import Path
 
+def _trim_cluster(members: list, coords: dict,
+                   max_size: int = 10, trim_radius: float = 10.0) -> list:
+    """
+    If a DBSCAN cluster is larger than max_size, it's almost always because
+    residues chained together along a surface rather than forming one
+    compact patch. Trim it: seed at the highest-scoring residue, then keep
+    the next best-scoring residues within trim_radius A of that seed,
+    up to max_size total.
+    """
+    if len(members) <= max_size:
+        return members
+
+    ranked = sorted(members, key=lambda r: r["score"], reverse=True)
+    seed = ranked[0]
+    sx, sy, sz = coords[seed["res_id_str"]]
+    r2 = trim_radius * trim_radius
+
+    kept = [seed]
+    for r in ranked[1:]:
+        if len(kept) >= max_size:
+            break
+        x, y, z = coords[r["res_id_str"]]
+        if (x - sx) ** 2 + (y - sy) ** 2 + (z - sz) ** 2 <= r2:
+            kept.append(r)
+
+    return kept
+
+
 def _cluster_hotspots(residue_scores: list, coords: dict,
-                       radius: float = 8.0, min_score: float = 0.3) -> list:
-    """Cluster PESTO hotspot residues by 3D Ca distance using DBSCAN."""
+                       radius: float = 6.0, min_score: float = 0.3,
+                       min_samples: int = 3, max_size: int = 10,
+                       trim_radius: float = 10.0) -> list:
+    """
+    Cluster PESTO hotspot residues by 3D Ca distance using DBSCAN.
+
+    radius      : max Ca-Ca distance (A) for two residues to link
+    min_samples : residues required in a neighborhood to seed a cluster —
+                  raising this above 2 stops thin chains of residues strung
+                  along a surface from being reported as one cluster
+    max_size    : hard cap on residues per reported cluster (see _trim_cluster)
+    trim_radius : when trimming an oversized cluster, keep only residues
+                  within this distance (A) of the top-scoring seed residue
+    """
     try:
         import numpy as np
         from sklearn.cluster import DBSCAN
-    except ImportError:
+    except ImportError as e:
+        print(f"[_cluster_hotspots] import failed: {e}")
         return []
 
     candidates = [r for r in residue_scores if r["score"] >= min_score]
@@ -51,19 +92,21 @@ def _cluster_hotspots(residue_scores: list, coords: dict,
         return []
 
     coord_arr = np.array([coords[r["res_id_str"]] for r in valid])
-    labels = DBSCAN(eps=radius, min_samples=2, metric="euclidean").fit(coord_arr).labels_
+    labels = DBSCAN(eps=radius, min_samples=min_samples,
+                     metric="euclidean").fit(coord_arr).labels_
 
-    clusters = {}
+    raw_clusters = {}
     for i, label in enumerate(labels):
         if label == -1:
             continue
-        clusters.setdefault(label, []).append(valid[i])
+        raw_clusters.setdefault(label, []).append(valid[i])
 
-    if not clusters:
+    if not raw_clusters:
         return []
 
     result = []
-    for label, members in clusters.items():
+    for label, members in raw_clusters.items():
+        members  = _trim_cluster(members, coords, max_size, trim_radius)
         scores   = [r["score"] for r in members]
         centroid = np.mean([coords[r["res_id_str"]] for r in members], axis=0)
         result.append({
