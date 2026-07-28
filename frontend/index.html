@@ -1739,7 +1739,7 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
 
     // Create a plain div with hardcoded pixel dimensions for 3Dmol
     const divEl = document.createElement('div');
-    divEl.style.width    = '600px';
+    divEl.style.width    = '100%';
     divEl.style.height   = '280px';
     divEl.style.position = 'relative';
     container.appendChild(divEl);
@@ -1766,8 +1766,9 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
             ];
             bands.forEach(({ min, max, color }) => {
               const resis = Object.entries(scores)
-                .filter(([k, v]) => k.startsWith(chain) && v >= min && v < max)
-                .map(([k]) => parseInt(k.slice(chain.length)));
+                .filter(([k, v]) => v >= min && v < max)
+                .map(([k]) => parseInt(String(k).match(/\d+/)?.[0]))
+                .filter(n => !isNaN(n));
               if (resis.length > 0)
                 viewer.setStyle({ chain, resi: resis }, { cartoon: { color }, stick: { radius: 0.1, color } });
             });
@@ -1777,8 +1778,8 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
           // drawn on top of the score-band coloring above so it's visible.
           if (selected && selected.length > 0) {
             const selResis = selected
-              .filter(r => r.startsWith(chain))
-              .map(r => parseInt(r.slice(chain.length)));
+              .map(r => parseInt(String(r).match(/\d+/)?.[0]))
+              .filter(n => !isNaN(n));
             if (selResis.length > 0) {
               viewer.setStyle(
                 { chain, resi: selResis },
@@ -1838,13 +1839,8 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
         }
 
         viewer.zoomTo();
+        viewer.resize();   // sync WebGL canvas to real container size — fixes hover picking
         viewer.render();
-        // Scale canvas to fill container
-        const canvas = divEl.querySelector('canvas');
-        if (canvas) {
-          canvas.style.width  = '100%';
-          canvas.style.height = '100%';
-        }
         setStatus('ready');
       })
       .catch(e => {
