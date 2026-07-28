@@ -104,6 +104,8 @@ class SLURMScheduler(BaseScheduler):
             f"#SBATCH --time={spec.hours:02d}:00:00",
             f"#SBATCH --partition={partition}",
         ]
+        if partition:
+            header.append(f"#SBATCH --partition={partition}")
         if spec.gpus > 0:
             header.append(f"#SBATCH --gres=gpu:{spec.gpus}")
         if self.account:
@@ -154,7 +156,10 @@ class SLURMScheduler(BaseScheduler):
             if not lines:
                 return JobStatus(job_id, "UNKNOWN")
             state, exit_code_str = lines[0].split("|")
+            # sacct reports "CANCELLED by <uid>" -> keep only the first token
             state = state.strip().upper()
+            state = state.split()[0] if state else "UNKNOWN"
+
             exit_code = int(exit_code_str.split(":")[0]) if exit_code_str else None
 
             state_map = {
