@@ -302,7 +302,7 @@ def _parse_bfactor_scores(pdb_path: str, target_chain: str, orig_pdb_path: str =
         ch, rid, rn = m if m else (key[0], key[1], resnames[key])  # fall back to PeSTo labels
         rid_str = f"{ch}{rid}"
         results.append({
-            "chain":      chain,
+            "chain":      ch,
             "res_id":     rid,
             "resname":    rn,
             "score":      round(score, 4),
