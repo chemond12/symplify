@@ -1916,7 +1916,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
     API.findHotspots(file, targetType, data.chain).then(r => {
       setAutoHots(r);
       if (r.details?.clusters?.length) setHotspots(r.details.clusters[0].residues);  // top-ranked spatial cluster
-      else if (r.hotspots?.length) setHotspots(r.hotspots.slice(0, 4));
+      // 0 clusters: leave empty so the user consciously picks a spatially-close set (see warning)
 
       // For proteins, re-score difficulty using hotspot binding site topology
       // The initial score didn't have hotspot info — update it if PESTO succeeded
@@ -2173,19 +2173,55 @@ function DifficultyPage({ data, onBack, onSubmit }) {
         </div>
       )}
 
-      {autoHots?.method === 'pesto' && autoHots.hotspots?.length > 0 && !loadingH && (
-        <div className="hint" style={{marginBottom:8}}>
-          PeSTo scored {autoHots.hotspots.length} interface residues and grouped them into{' '}
-          {autoHots.details?.clusters?.length || 0} spatial clusters — the highest-ranked cluster is
-          pre-selected below. BindCraft works best with a{' '}
-          <strong style={{color:'var(--teal)'}}>focused set of 3–5</strong>; remove lower-scoring ones (×) to tighten it.
-          {hotspots.length > 6 && (
-            <span style={{color:'var(--amber)', display:'block', marginTop:4}}>
-              ⚠ {hotspots.length} selected is a lot — too many hotspots can prevent any designs from succeeding.
-            </span>
-          )}
-        </div>
-      )}
+      {autoHots?.method === 'pesto' && !loadingH && (() => {
+        const nClusters = autoHots.details?.clusters?.length || 0;
+        const nScored   = Object.keys(autoHots.details?.scores || {}).length;
+        const coords    = autoHots.details?.coords || {};
+        const pts = hotspots.map(h => coords[h]).filter(Boolean);
+        let spread = null;
+        if (pts.length >= 2) {
+          spread = 0;
+          for (let i = 0; i < pts.length; i++)
+            for (let j = i + 1; j < pts.length; j++) {
+              const d = Math.hypot(pts[i][0]-pts[j][0], pts[i][1]-pts[j][1], pts[i][2]-pts[j][2]);
+              if (d > spread) spread = d;
+            }
+        }
+        const sColor = spread == null ? '' : spread <= 18 ? 'var(--teal)' : spread <= 28 ? 'var(--amber)' : 'var(--red)';
+        const sNote  = spread == null ? '' : spread <= 18 ? 'tight — good for one binder'
+                     : spread <= 28 ? 'a bit loose' : "too spread — one binder likely can't reach all of these";
+        return (
+          <div style={{marginBottom:8}}>
+            {nClusters >= 1 ? (
+              <div className="hint">
+                PeSTo found {nScored} interface residues in {nClusters} spatial{' '}
+                {nClusters === 1 ? 'patch' : 'patches'}. The top patch is pre-selected — BindCraft works
+                best with a <strong style={{color:'var(--teal)'}}>focused set of 3–5</strong> that sit
+                close together; remove lower-scoring ones (×) to tighten it.
+              </div>
+            ) : (
+              <div style={{padding:'10px 12px', borderRadius:8, background:'rgba(255,92,122,0.10)',
+                           border:'1px solid var(--red)', color:'var(--red)', fontSize:13, lineHeight:1.5}}>
+                ⚠ <strong>No tight binding patch found.</strong> PeSTo's high-scoring residues are spread
+                across the surface, not clustered. A binder can only engage residues that are close together
+                in 3D — submitting scattered hotspots usually produces <strong>zero successful designs</strong>.
+                Rotate the 3D view above, pick 3–5 residues that are visibly near each other, or leave the
+                field blank and let BindCraft choose.
+              </div>
+            )}
+            {spread != null && (
+              <div style={{marginTop:6, fontSize:13}}>
+                Spread of selected: <strong style={{color:sColor}}>{spread.toFixed(1)} Å</strong> · {sNote}
+              </div>
+            )}
+            {hotspots.length > 6 && (
+              <div style={{color:'var(--amber)', fontSize:13, marginTop:4}}>
+                ⚠ {hotspots.length} selected is a lot — too many hotspots can prevent any designs from succeeding.
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {autoHots?.method === 'pesto' && autoHots.hotspots?.length > hotspots.length && !loadingH && (
         <div style={{marginBottom:12}}>

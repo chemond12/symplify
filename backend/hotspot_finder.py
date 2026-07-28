@@ -117,6 +117,7 @@ def _run_pesto(pdb_path: str, chain: str, pesto_dir: str,
                              "Leave the hotspot field blank so BindCraft auto-selects "
                              "the binding mode?"),
                     "clusters":          data.get("clusters", []),
+                    "coords":            data.get("coords", {}),
                     "recommended":       data.get("recommended", []),
                 }
             )
@@ -129,6 +130,7 @@ def _run_pesto(pdb_path: str, chain: str, pesto_dir: str,
                 "scores":            scores,
                 "resnames":          resnames,
                 "clusters":          data.get("clusters", []),
+                "coords":            data.get("coords", {}),
                 "threshold":         data.get("threshold", 0.5),
                 "model":             data.get("model", "i_v4_1"),
                 "n_residues_scored": len(data.get("residues", [])),
