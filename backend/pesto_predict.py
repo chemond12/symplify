@@ -203,7 +203,7 @@ def run_pesto(pdb_path: str, chain: str, out_path: str,
             output_pdb = tmp_pdb
 
     # Parse b-factors + CA coords from output PDB
-    residue_scores, coords = _parse_bfactor_scores(output_pdb, chain)
+    residue_scores, coords = _parse_bfactor_scores(output_pdb, chain, pdb_path)
 
     # Sort hotspots by score descending, take top 20
     residue_scores.sort(key=lambda x: x["score"], reverse=True)
@@ -233,53 +233,83 @@ def run_pesto(pdb_path: str, chain: str, out_path: str,
     return result
 
 
-def _parse_bfactor_scores(pdb_path: str, target_chain: str):
+def _parse_bfactor_scores(pdb_path: str, target_chain: str, orig_pdb_path: str = None):
     """
-    Parse per-residue PESTO scores from b-factor field of output PDB.
-    Returns (residues, coords):
-      residues : list of {chain, res_id, resname, score, res_id_str}
-      coords   : {res_id_str: (x, y, z)} from each residue's CA atom
+    Parse per-residue PESTO scores from b-factor field of output PDB, then
+    re-key every residue to the ORIGINAL PDB's chain + number by matching CA
+    coordinates. PeSTo's preprocessing (concatenate_chains/split_by_chain)
+    renumbers and relabels, so its output ids don't match the uploaded file —
+    but atom positions are unchanged, so CA coords map them back exactly.
+    Returns (residues, coords) with coords keyed by the ORIGINAL res_id_str.
     """
-    seen     = {}   # (chain, res_id) -> max score across atoms
-    resnames = {}
-    coords   = {}   # res_id_str -> (x, y, z) of the CA atom
+    # --- scores + CA coords from the PeSTo output (its own labels) ---
+    seen, resnames, out_ca = {}, {}, {}
 
     with open(pdb_path) as f:
         for line in f:
             if not line.startswith(("ATOM", "HETATM")):
                 continue
-            chain = line[21].strip()
-            if chain != target_chain:
-                continue
             try:
+                ch      = line[21].strip()
                 res_id  = int(line[22:26].strip())
                 resname = line[17:20].strip()
                 bfactor = float(line[60:66].strip())
             except (ValueError, IndexError):
                 continue
 
-            key = (chain, res_id)
+            key = (ch, res_id)
             if key not in seen or bfactor > seen[key]:
                 seen[key]     = bfactor
                 resnames[key] = resname
 
             if line[12:16].strip() == "CA":
                 try:
-                    coords[f"{chain}{res_id}"] = (
-                        float(line[30:38]), float(line[38:46]), float(line[46:54]))
+                    out_ca[key] = (float(line[30:38]), float(line[38:46]), float(line[46:54]))
                 except (ValueError, IndexError):
                     pass
 
-    results = []
-    for (chain, res_id), score in sorted(seen.items(), key=lambda x: x[0][1]):
+    # --- CA map of the ORIGINAL PDB's target chain ---
+    orig = []  # (x, y, z, chain, res_id, resname)
+    if orig_pdb_path:
+        with open(orig_pdb_path) as f:
+            for line in f:
+                if not line.startswith(("ATOM", "HETATM")) or line[12:16].strip() != "CA":
+                    continue
+                ch = line[21].strip()
+                if target_chain and ch != target_chain:
+                    continue
+                try:
+                    orig.append((float(line[30:38]), float(line[38:46]), float(line[46:54]),
+                                 ch, int(line[22:26].strip()), line[17:20].strip()))
+                except (ValueError, IndexError):
+                    continue
+    
+    def match(xyz):
+        """Nearest original CA within 1 A -> (chain, res_id, resname), else None."""
+        if not orig or xyz is None:
+            return None
+        bx, by, bz = xyz
+        best, bestd = None, 1.0
+        for x, y, z, ch, rid, rn in orig:
+            d = ((x - bx) ** 2 + (y - by) ** 2 + (z - bz) ** 2) ** 0.5
+            if d < bestd:
+                best, bestd = (ch, rid, rn), d
+        return best
+
+    results, coords = [], {}
+    for key, score in sorted(seen.items(), key=lambda kv: kv[0][1]):
+        m = match(out_ca.get(key))
+        ch, rid, rn = m if m else (key[0], key[1], resnames[key])  # fall back to PeSTo labels
+        rid_str = f"{ch}{rid}"
         results.append({
             "chain":      chain,
-            "res_id":     res_id,
-            "resname":    resnames[(chain, res_id)],
+            "res_id":     rid,
+            "resname":    rn,
             "score":      round(score, 4),
-            "res_id_str": f"{chain}{res_id}",
+            "res_id_str": rid_str,
         })
-
+        if key in out_ca:
+            coords[rid_str] = out_ca[key]
     return results, coords
 
 
