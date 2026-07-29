@@ -1756,7 +1756,7 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
         viewer.addModel(text, fmt);
 
         if (targetType === 'protein') {
-          viewer.setStyle({}, { cartoon: { color: '#8A97A8', opacity: 0.45 } }); // clear default lines/atoms
+          viewer.setStyle({}, { cartoon: { color: '#B3BECC', opacity: 0.5 } }); // clear default lines/atoms
           viewer.setStyle({chain}, { cartoon: { color: '#2A3F5A' } });
           if (hasScores) {
             const bands = [
@@ -1887,7 +1887,7 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
               <span><span className="legend-swatch" style={{background:'#F5A623'}} />Medium (0.5+)</span>
               <span><span className="legend-swatch" style={{background:'#4ECDC4'}} />High (0.7+)</span>
               <span><span className="legend-swatch" style={{background:'#5CF08A'}} />Very high (0.85+)</span>
-              <span><span className="legend-swatch" style={{background:'#8A97A8'}} />Other chains</span>
+              <span><span className="legend-swatch" style={{background:'#5F6A7A'}} />Other chains</span>
               {selected && selected.length > 0 && (
                 <span><span className="legend-swatch" style={{background:'#C77DFF'}} />Selected</span>
               )}
