@@ -1756,7 +1756,7 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
         viewer.addModel(text, fmt);
 
         if (targetType === 'protein') {
-          viewer.setStyle({}, {}); // clear default lines/atoms
+          viewer.setStyle({}, {cartoon: { color: '#1B2A3D', opacity: 0.35 }}); // clear default lines/atoms
           viewer.setStyle({chain}, { cartoon: { color: '#2A3F5A' } });
           if (hasScores) {
             const bands = [
