@@ -1756,13 +1756,14 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
         viewer.addModel(text, fmt);
 
         if (targetType === 'protein') {
+          viewer.setStyle({}, {}); // clear default lines/atoms
           viewer.setStyle({chain}, { cartoon: { color: '#2A3F5A' } });
           if (hasScores) {
             const bands = [
-              { min: 0.3, max: 0.5, color: '#7E95B8' },
+              { min: 0.3, max: 0.5, color: '#3B4757' },
               { min: 0.5, max: 0.7, color: '#F5A623' },
               { min: 0.7, max: 0.85, color: '#4ECDC4' },
-              { min: 0.85, max: 2.0, color: '#00C2B2' },
+              { min: 0.85, max: 2.0, color: '#5CF08A' },
             ];
             bands.forEach(({ min, max, color }) => {
               const resis = Object.entries(scores)
@@ -1770,7 +1771,7 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
                 .map(([k]) => parseInt(String(k).match(/\d+/)?.[0]))
                 .filter(n => !isNaN(n));
               if (resis.length > 0)
-                viewer.setStyle({ chain, resi: resis }, { cartoon: { color }, stick: { radius: 0.1, color } });
+                viewer.setStyle({ chain, resi: resis }, { cartoon: { color } });
             });
           }
 
@@ -1784,9 +1785,9 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
               viewer.setStyle(
                 { chain, resi: selResis },
                 {
-                  cartoon: { color: '#FFD447' },
-                  stick:   { radius: 0.22, color: '#FFD447' },
-                  sphere:  { radius: 0.4,  color: '#FFD447' },
+                  cartoon: { color: '#C77DFF' },
+                  stick:   { radius: 0.22, color: '#C77DFF' },
+                  sphere:  { radius: 0.4,  color: '#C77DFF' },
                 }
               );
             }
@@ -1882,12 +1883,12 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
         <div className="viewer-legend">
           {scores && Object.keys(scores).length > 0 ? (
             <>
-              <span><span className="legend-swatch" style={{background:'#7E95B8'}} />Low (0.3+)</span>
+              <span><span className="legend-swatch" style={{background:'#3B4757'}} />Low (0.3+)</span>
               <span><span className="legend-swatch" style={{background:'#F5A623'}} />Medium (0.5+)</span>
               <span><span className="legend-swatch" style={{background:'#4ECDC4'}} />High (0.7+)</span>
-              <span><span className="legend-swatch" style={{background:'#00C2B2'}} />Very high (0.85+)</span>
+              <span><span className="legend-swatch" style={{background:'#5CF08A'}} />Very high (0.85+)</span>
               {selected && selected.length > 0 && (
-                <span><span className="legend-swatch" style={{background:'#FFD447'}} />Selected</span>
+                <span><span className="legend-swatch" style={{background:'#C77DFF'}} />Selected</span>
               )}
             </>
           ) : (
