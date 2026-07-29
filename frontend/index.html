@@ -1942,29 +1942,38 @@ function DifficultyPage({ data, onBack, onSubmit }) {
         setHotspots(r.details.clusters[0].residues);
       }
 
-      // For proteins, re-score difficulty using hotspot binding site topology
-      // The initial score didn't have hotspot info — update it if PESTO succeeded
-      if (targetType === 'protein' && r.method === 'pesto' && r.details?.scores) {
-        const scores = Object.values(r.details.scores);
-        const maxScore = Math.max(...scores);
-        const highCount = scores.filter(s => s >= 0.7).length;
-        // Good binding site: high max score and multiple high-scoring residues
-        if (maxScore >= 0.8 && highCount >= 3) {
-          setDifficulty(d => ({
-            ...d,
-            factors: {
-              ...d.factors,
-              binding_site_topology: {
-                score: Math.max(10, (d.factors?.binding_site_topology?.score || 40) - 20),
-                value: null,
-                unit: null,
-                note: `PESTO: ${highCount} high-confidence hotspots (max score ${maxScore.toFixed(2)})`,
-              }
-            },
-            overall: Math.max(5, (d.overall || 50) - 15),
-            warnings: (d.warnings || []).filter(w => !w.includes('hotspot')),
-          }));
-        }
+      // Re-score chemistry + hotspot patch now that PeSTo gave us hotspots + coords.
+      if (targetType === 'protein' && r.method === 'pesto' && r.details?.coords) {
+        const HYDRO = new Set(['A','V','L','I','M','F','W','Y','C']);
+        const AA3 = {ALA:'A',VAL:'V',LEU:'L',ILE:'I',MET:'M',PHE:'F',TRP:'W',TYR:'Y',CYS:'C',
+                     GLY:'G',PRO:'P',SER:'S',THR:'T',ASN:'N',GLN:'Q',ASP:'D',GLU:'E',LYS:'K',ARG:'R',HIS:'H'};
+        const resn = r.details?.resnames || {};
+        const sel  = (r.details?.clusters?.[0]?.residues) || r.hotspots || [];
+        setDifficulty(d => {
+          const factors = { ...d.factors };
+          const aas = sel.map(h => AA3[resn[h]] || '').filter(Boolean);
+          if (aas.length) {
+            const frac = aas.filter(a => HYDRO.has(a)).length / aas.length;
+            const s = frac >= 0.5 ? 15 : frac >= 0.3 ? 40 : 70;
+            factors.epitope_chemistry = { score: s, value: Math.round(100*frac),
+              unit: '% hydrophobic', note: `${Math.round(100*frac)}% of hotspots hydrophobic` };
+          }
+          const pts = sel.map(h => r.details.coords[h]).filter(Boolean);
+          if (pts.length >= 2) {
+            let mx = 0;
+            for (let i=0;i<pts.length;i++) for (let j=i+1;j<pts.length;j++)
+              mx = Math.max(mx, Math.hypot(pts[i][0]-pts[j][0], pts[i][1]-pts[j][1], pts[i][2]-pts[j][2]));
+            const s = mx <= 20 ? 15 : mx <= 30 ? 40 : 70;
+            factors.hotspot_patch = { score: s, value: +mx.toFixed(1),
+              unit: 'Å spread', note: `Hotspots span ${mx.toFixed(1)} Å` };
+          }
+          const W = { epitope_chemistry:0.30, hotspot_patch:0.25, flexibility:0.20, globularity:0.15, target_size:0.10 };
+          const present = Object.keys(W).filter(k => factors[k]);
+          const tot = present.reduce((a,k)=>a+W[k],0) || 1;
+          const overall = present.reduce((a,k)=>a + factors[k].score*(W[k]/tot), 0);
+          return { ...d, factors, overall: Math.round(overall*10)/10,
+                   warnings: (d.warnings||[]).filter(w => !w.toLowerCase().includes('hotspot')) };
+        });
       }
       setLoadingH(false);
     }).catch(() => setLoadingH(false));
@@ -2057,27 +2066,45 @@ function DifficultyPage({ data, onBack, onSubmit }) {
       </div>
 
       {/* Factors */}
-      {difficulty.factors && Object.keys(difficulty.factors).length > 0 && (
+      {difficulty.factors && Object.keys(difficulty.factors).length > 0 && (() => {
+        const LABELS = {
+          epitope_chemistry: 'Epitope chemistry',
+          hotspot_patch:     'Hotspot patch',
+          flexibility:       'Flexibility',
+          globularity:       'Globularity',
+          target_size:       'Target size',
+        };
+        return (
         <>
           <div className="section-label">Factors</div>
           <div className="factor-grid">
-            {Object.entries(difficulty.factors).map(([k, v]) => (
-              <div key={k} className="factor-card">
-                <div className="factor-name">{k.replace(/_/g, ' ')}</div>
-                <div className="factor-bar-bg">
-                  <div className="factor-bar-fill"
-                       style={{ width: `${v.score}%`,
-                                background: v.score > 60 ? 'var(--red)' :
-                                            v.score > 35 ? 'var(--amber)' : 'var(--teal)' }} />
+            {Object.entries(difficulty.factors).map(([k, v]) => {
+              const ease = 100 - v.score; // higher = easier -> fuller bar
+              return (
+                <div key={k} className="factor-card">
+                  <div className="factor-name">{LABELS[k] || k.replace(/_/g, ' ')}</div>
+                  <div className="factor-bar-bg">
+                    <div className="factor-bar-fill"
+                        style={{ width: `${ease}%`,
+                                  background: ease > 65 ? 'var(--red)' :
+                                              ease > 40 ? 'var(--amber)' : 'var(--teal)' }} />
+                  </div>
+                  <div className="factor-value">
+                    {v.value !== null ? `${v.value} ${v.unit || ''}` : v.note}
+                  </div>
                 </div>
-                <div className="factor-value">
-                  {v.value !== null ? `${v.value} ${v.unit || ''}` : v.note}
-                </div>
-              </div>
-            ))}
+              );
+            })}
+          </div>
+          <div className="hint" style={{marginTop:10, fontSize:12, lineHeight:1.5}}>
+            This estimate reflects only the uploaded structure. Glycosylation, post-translational
+            modifications, disordered regions, and expression/solubility — which PDB files often omit —
+            can also make a target harder. Treat it as a guide, not a guarantee, and look into your
+            specific protein.
           </div>
         </>
-      )}
+        );
+      })()}
 
       {/* Warnings */}
       {difficulty.warnings?.length > 0 && (
