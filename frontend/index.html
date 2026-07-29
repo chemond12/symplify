@@ -1902,6 +1902,21 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
 // ============================================================
 // STEP 2: Difficulty score + hotspot review
 // ============================================================
+
+// Compact hotspot patch from PeSTo scores + CA coords: seed at the top-scoring residue,
+// add next-best residues within `radius` A (one hot region).
+function compactPatch(scores, coords, radius = 12, n = 5) {
+  const ids = Object.keys(scores || {}).filter(id => coords && coords[id]);
+  if (!ids.length) return [];
+  ids.sort((a, b) => scores[b] - scores[a]);
+  const [sx, sy, sz] = coords[ids[0]];
+  const near = ids.filter(id => {
+    const [x, y, z] = coords[id];
+    return Math.hypot(x - sx, y - sy, z - sz) <= radius;
+  });
+  return near.slice(0, n);
+}
+
 function DifficultyPage({ data, onBack, onSubmit }) {
   const { targetType, file } = data;
   const [hotspots,   setHotspots]   = useState(data.hotspots || []);
@@ -1915,8 +1930,15 @@ function DifficultyPage({ data, onBack, onSubmit }) {
     setLoadingH(true);
     API.findHotspots(file, targetType, data.chain).then(r => {
       setAutoHots(r);
-      if (r.details?.clusters?.length) setHotspots(r.details.clusters[0].residues);  // top-ranked spatial cluster
-      // 0 clusters: leave empty so the user consciously picks a spatially-close set (see warning)
+      // Default to a compact patch from scores + coords; fall back to the top DBSCAN cluster.
+      if (r.details?.coords && r.details?.scores) {
+        const patch = compactPatch(r.details.scores, r.details.coords);
+        if (patch.length) setHotspots(patch);
+        else if (r.details?.clusters?.length) setHotspots(r.details.clusters[0].residues);
+      } 
+      else if (r.details?.clusters?.length) {
+        setHotspots(r.details.clusters[0].residues);
+      }
 
       // For proteins, re-score difficulty using hotspot binding site topology
       // The initial score didn't have hotspot info — update it if PESTO succeeded
@@ -2174,8 +2196,6 @@ function DifficultyPage({ data, onBack, onSubmit }) {
       )}
 
       {autoHots?.method === 'pesto' && !loadingH && (() => {
-        const nClusters = autoHots.details?.clusters?.length || 0;
-        const nScored   = Object.keys(autoHots.details?.scores || {}).length;
         const coords    = autoHots.details?.coords || {};
         const pts = hotspots.map(h => coords[h]).filter(Boolean);
         let spread = null;
@@ -2187,26 +2207,29 @@ function DifficultyPage({ data, onBack, onSubmit }) {
               if (d > spread) spread = d;
             }
         }
-        const sColor = spread == null ? '' : spread <= 18 ? 'var(--teal)' : spread <= 28 ? 'var(--amber)' : 'var(--red)';
-        const sNote  = spread == null ? '' : spread <= 18 ? 'tight — good for one binder'
-                     : spread <= 28 ? 'a bit loose' : "too spread — one binder likely can't reach all of these";
+        const TIGHT = 20, MAX = 30;  // one binding site spans ~30 A
+        const sColor = spread == null ? '' : spread <= TIGHT ? 'var(--teal)' : spread <= MAX ? 'var(--amber)' : 'var(--red)';
+        const sNote  = spread == null ? '' : spread <= TIGHT ? 'tight — focused patch'
+                     : spread <= MAX ? 'workable — about the size of one binding site'
+                     : 'too spread — larger than a single binding site';
         return (
           <div style={{marginBottom:8}}>
-            {nClusters >= 1 ? (
+            {hotspots.length === 0 ? (
               <div className="hint">
-                PeSTo found {nScored} interface residues in {nClusters} spatial{' '}
-                {nClusters === 1 ? 'patch' : 'patches'}. The top patch is pre-selected — BindCraft works
-                best with a <strong style={{color:'var(--teal)'}}>focused set of 3–5</strong> that sit
-                close together; remove lower-scoring ones (×) to tighten it.
+                Pick 3–5 residues that sit close together in the 3D view above — a binder engages one
+                compact patch. Leave blank to let BindCraft choose.
               </div>
-            ) : (
+            ) : spread != null && spread > MAX ? (
               <div style={{padding:'10px 12px', borderRadius:8, background:'rgba(255,92,122,0.10)',
                            border:'1px solid var(--red)', color:'var(--red)', fontSize:13, lineHeight:1.5}}>
-                ⚠ <strong>No tight binding patch found.</strong> PeSTo's high-scoring residues are spread
-                across the surface, not clustered. A binder can only engage residues that are close together
-                in 3D — submitting scattered hotspots usually produces <strong>zero successful designs</strong>.
-                Rotate the 3D view above, pick 3–5 residues that are visibly near each other, or leave the
-                field blank and let BindCraft choose.
+                ⚠ <strong>Selected residues span {spread.toFixed(0)} Å</strong> — wider than a single binding
+                site (~30 Å). A binder can't reach residues this far apart, which usually yields{' '}
+                <strong>zero successful designs</strong>. Tighten to one patch, or run separate jobs per region.
+              </div>
+            ) : (
+              <div className="hint">
+                Selected residues form a focused patch. BindCraft works best with a{' '}
+                <strong style={{color:'var(--teal)'}}>focused set of 3–5</strong>; remove lower-scoring ones (×) to tighten it.
               </div>
             )}
             {spread != null && (
