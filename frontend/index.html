@@ -1498,7 +1498,7 @@ function UploadPage({ onNext }) {
         <div className="field-group" style={{marginBottom:16}}>
           <span className="field-label">Fetch from RCSB</span>
           <div className="input-row">
-            <input className="input" placeholder="PDB ID (e.g. 1KDM) or ligand code (e.g. 7V7)"
+            <input className="input" placeholder="PDB ID (e.g. 1KDM) or ligand (e.g. 7V7)"
                    value={pdbIdInput} maxLength={4}
                    style={{textTransform:'uppercase', letterSpacing:2, fontFamily:'var(--font-mono)'}}
                    onChange={e => { setPdbIdInput(e.target.value.toUpperCase()); setPdbError(''); }}
@@ -2086,7 +2086,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
                   <div className="factor-bar-bg">
                     <div className="factor-bar-fill"
                         style={{ width: `${ease}%`,
-                                  background: ease > 65 ? 'var(--red)' :
+                                  background: ease > 65 ? 'var(--teal)' :
                                               ease > 40 ? 'var(--amber)' : 'var(--red)' }} />
                   </div>
                   <div className="factor-value">
