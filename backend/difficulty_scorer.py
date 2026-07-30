@@ -69,12 +69,16 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None) -> Dif
     if n_residues < 40:
         size_score = 55
         warnings.append("Very small target (<40 aa) — limited surface for binder contacts")
-    elif n_residues <= 400:
-        size_score = 12            # normal range — essentially not a difficulty driver
-    elif n_residues <= 700:
+    elif n_residues <= 120:
+        size_score = 10            # normal range — essentially not a difficulty driver
+    elif n_residues <= 250:
+        size_score = 20
+    elif n_residues <= 500:
         size_score = 30
-    else:
+    elif n_residues <= 800:
         size_score = 45
+    else:
+        size_score = 55
     factors["target_size"] = {
         "score": size_score, "value": n_residues,
         "unit": "residues", "note": f"{n_residues} residues",

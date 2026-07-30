@@ -1948,7 +1948,9 @@ function DifficultyPage({ data, onBack, onSubmit }) {
         const AA3 = {ALA:'A',VAL:'V',LEU:'L',ILE:'I',MET:'M',PHE:'F',TRP:'W',TYR:'Y',CYS:'C',
                      GLY:'G',PRO:'P',SER:'S',THR:'T',ASN:'N',GLN:'Q',ASP:'D',GLU:'E',LYS:'K',ARG:'R',HIS:'H'};
         const resn = r.details?.resnames || {};
-        const sel  = (r.details?.clusters?.[0]?.residues) || r.hotspots || [];
+        const sel  = (r.details?.coords && r.details?.scores)
+          ? compactPatch(r.details.scores, r.details.coords)
+          : (r.details?.clusters?.[0]?.residues || r.hotspots || []);
         setDifficulty(d => {
           const factors = { ...d.factors };
           const aas = sel.map(h => AA3[resn[h]] || '').filter(Boolean);
@@ -1985,7 +1987,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
                    grade === 'Hard' ? '#FF8C42' : 'var(--red)';
 
   const circumference = 2 * Math.PI * 48;
-  const offset        = circumference * (1 - score / 100);
+  const offset        = circumference * (score / 100);
 
   async function handleSubmit() {
     setSubmitting(true);
