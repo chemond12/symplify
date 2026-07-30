@@ -1468,7 +1468,7 @@ function UploadPage({ onNext }) {
       }
       onNext({ file, jobName, targetType, chain, hotspots,
                linkerRep,
-               nDesigns: nDesigns || (targetType === 'protein' ? 100 : null),
+               nDesigns: nDesigns || (targetType === 'protein' ? 96 : null),
                targetPass,
                thresholds: { iptm: iptmThresh, ptm: ptmThresh, plddt,
                              rmsd, dg, delta_unsat_hbonds: unsatHbonds,
@@ -2059,7 +2059,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
           </h3>
           <p className="rec-designs" style={{color:'var(--grey-2)', fontSize:12}}>
             {data.targetType === 'protein'
-              ? 'BindCraft will generate 100 accepted designs by default — adjustable in Advanced settings'
+              ? 'BindCraft will generate 96 accepted designs by default — adjustable in Advanced settings'
               : 'n_designs will be determined automatically after a 100-design pilot run'}
           </p>
         </div>
@@ -2087,7 +2087,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
                     <div className="factor-bar-fill"
                         style={{ width: `${ease}%`,
                                   background: ease > 65 ? 'var(--red)' :
-                                              ease > 40 ? 'var(--amber)' : 'var(--teal)' }} />
+                                              ease > 40 ? 'var(--amber)' : 'var(--red)' }} />
                   </div>
                   <div className="factor-value">
                     {v.value !== null ? `${v.value} ${v.unit || ''}` : v.note}
@@ -2096,11 +2096,11 @@ function DifficultyPage({ data, onBack, onSubmit }) {
               );
             })}
           </div>
-          <div className="hint" style={{marginTop:10, fontSize:12, lineHeight:1.5}}>
-            This estimate reflects only the uploaded structure. Glycosylation, post-translational
-            modifications, disordered regions, and expression/solubility — which PDB files often omit —
-            can also make a target harder. Treat it as a guide, not a guarantee, and look into your
-            specific protein.
+          <div className="hint" style={{marginTop:10, marginBottom:24, fontSize:12, lineHeight:1.5}}>
+            This is an evaluation based only on the uploaded pdb. Post-translational modifications, 
+            disordered regions, and expression/solubility (which can be omitted in PDB files)
+            also make a target harder. Do not treat the score as a guarantee, and make sure 
+            to look into your specific protein.
           </div>
         </>
         );
@@ -2422,7 +2422,7 @@ function PilotPanel({ jobId, pilot, onConfirm }) {
         <div className="confirm-row">
           <label>n_designs</label>
           <input className="input" type="number" value={nDesigns}
-                 onChange={e => setNDesigns(+e.target.value)} step={100} min={100} />
+                 onChange={e => setNDesigns(+e.target.value)} step={12} min={12} />
           <span className="pilot-rec">
             Recommended: {pilot.recommended_n_designs?.toLocaleString()}
             {pilot.pass_rate > 0
