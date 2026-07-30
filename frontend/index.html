@@ -492,11 +492,8 @@
   }
 
   .warnings-box {
-    background: var(--amber-dim);
-    border: 1px solid var(--amber);
-    border-radius: var(--radius);
-    padding: 16px 20px;
     margin-bottom: 24px;
+    color: var(--amber);
   }
 
   .warnings-box h4 {
@@ -518,7 +515,7 @@
     padding: 3px 0;
   }
 
-  .warnings-box li::before { content: "⚠ "; color: var(--amber); }
+  .warnings-box li::before { content: " "; }
 
   .action-row {
     display: flex;
@@ -2049,7 +2046,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
                     style={{transition:'stroke-dashoffset 1s ease'}} />
           </svg>
           <div className="gauge-value">
-            <span className="gauge-number" style={{color: gradeCol}}>{score.toFixed(0)}</span>
+            <span className="gauge-number" style={{color: gradeCol}}>{(100 - score).toFixed(0)}</span>
             <span className="gauge-grade">{grade}</span>
           </div>
         </div>
