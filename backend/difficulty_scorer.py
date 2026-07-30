@@ -128,7 +128,7 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None) -> Dif
                   if f"{res.parent.id}{res.id[1]}" in hotspot_residues]
         if hs_aas:
             frac_hydro = sum(1 for a in hs_aas if a in HYDRO) / len(hs_aas)
-            if frac_hydro >= 0.5:
+            if frac_hydro >= 0.4:
                 chem_score = 15
             elif frac_hydro >= 0.3:
                 chem_score = 40
@@ -390,7 +390,10 @@ def _build_report(overall: float, factors: dict,
     if overall < 25:
         grade = "Easy"
         n_designs = 2000
-    elif overall < 50:
+    elif overall < 45:
+        grade = "Doable"
+        n_designs = 3000
+    elif overall < 60:
         grade = "Medium"
         n_designs = 5000
     elif overall < 70:

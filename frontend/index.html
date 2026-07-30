@@ -1953,7 +1953,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
           const aas = sel.map(h => AA3[resn[h]] || '').filter(Boolean);
           if (aas.length) {
             const frac = aas.filter(a => HYDRO.has(a)).length / aas.length;
-            const s = frac >= 0.5 ? 15 : frac >= 0.3 ? 40 : 70;
+            const s = frac >= 0.4 ? 15 : frac >= 0.25 ? 40 : 70;
             factors.epitope_chemistry = { score: s, value: Math.round(100*frac),
               unit: '% hydrophobic', note: `${Math.round(100*frac)}% of hotspots hydrophobic` };
           }
@@ -1980,7 +1980,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
 
   const score    = difficulty.overall || 0;
   const grade    = score < 25 ? 'Easy' : score < 50 ? 'Medium' : score < 70 ? 'Hard' : 'Very Hard';
-  const gradeCol = grade === 'Easy' ? 'var(--green)' : grade === 'Medium' ? 'var(--amber)' :
+  const gradeCol = grade === 'Easy' ? 'var(--green)' : grade === 'Doable' ? 'var(--teal)' : grade === 'Medium' ? 'var(--amber)' :
                    grade === 'Hard' ? '#FF8C42' : 'var(--red)';
 
   const circumference = 2 * Math.PI * 48;
@@ -2053,6 +2053,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
         <div className="gauge-details">
           <h3>
             {grade === 'Easy' ? 'Favorable target' :
+             grade === 'Doable' ? 'Doable challenge' :
              grade === 'Medium' ? 'Moderate challenge' :
              grade === 'Hard' ? 'Difficult target' : 'Very challenging target'}
           </h3>
