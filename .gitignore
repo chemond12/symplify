@@ -3,3 +3,4 @@ config.yaml
 symplify.db
 uploads/
 frontend/dist/
+__pycache__/
