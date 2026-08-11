@@ -2177,12 +2177,21 @@ function DifficultyPage({ data, onBack, onSubmit }) {
         </div>
       )}
 
-      {autoHots?.method === 'pesto' && autoHots.hotspots?.length > 0 && !loadingH && (
+      {(autoHots?.method === 'pesto' || autoHots?.method === 'rdkit_pharmacophore') && autoHots.hotspots?.length > 0 && !loadingH && (
         <div className="hint" style={{marginBottom:8}}>
-          PeSTo scored {autoHots.hotspots.length} interface residues and grouped them into{' '}
-          {autoHots.details?.clusters?.length || 0} spatial clusters — the highest-ranked cluster is
-          pre-selected below. BindCraft works best with a{' '}
-          <strong style={{color:'var(--teal)'}}>focused set of 3–5</strong>; remove lower-scoring ones (×) to tighten it.
+          {autoHots.method === 'pesto' ? (
+            <>
+              PeSTo scored {autoHots.hotspots.length} interface residues and grouped them into{' '}
+              {autoHots.details?.clusters?.length || 0} spatial clusters — the highest-ranked cluster is
+              pre-selected below. BindCraft works best with a{' '}
+              <strong style={{color:'var(--teal)'}}>focused set of 3–5</strong>; remove lower-scoring ones (×) to tighten it.
+            </>
+          ) : (
+            <>
+              RDKit identified {autoHots.hotspots.length} pharmacophore features — the top-ranked ones are
+              pre-selected below. Remove ones you don't want (×) and re-add them anytime from the full list below.
+            </>
+          )}
           {hotspots.length > 6 && (
             <span style={{color:'var(--amber)', display:'block', marginTop:4}}>
               ⚠ {hotspots.length} selected is a lot — too many hotspots can prevent any designs from succeeding.
@@ -2191,22 +2200,25 @@ function DifficultyPage({ data, onBack, onSubmit }) {
         </div>
       )}
 
-      {autoHots?.method === 'pesto' && autoHots.hotspots?.length > hotspots.length && !loadingH && (
+      {(autoHots?.method === 'pesto' || autoHots?.method === 'rdkit_pharmacophore') && autoHots.hotspots?.length > hotspots.length && !loadingH && (
         <div style={{marginBottom:12}}>
           <button className="advanced-toggle" onClick={() => setShowAll(v => !v)}>
-            {showAll ? '▾ Hide full list' : `▸ Show all ${autoHots.hotspots.length} PeSTo residues`}
+            {showAll ? '▾ Hide full list' : `▸ Show all ${autoHots.hotspots.length} ${autoHots.method === 'pesto' ? 'PeSTo residues' : 'RDKit features'}`}
           </button>
           {showAll && (
             <div className="tag-list" style={{marginTop:6}}>
               {autoHots.hotspots.map(h => {
                 const on = hotspots.includes(h);
                 const sc = autoHots.details?.scores?.[h];
+                const label = autoHots.method === 'pesto'
+                  ? aaLabel(h, autoHots?.details?.resnames, data.chain)
+                  : h;
                 return (
                   <span key={h} className="tag"
                         style={{cursor:'pointer', opacity: on ? 1 : 0.45,
                                 borderColor: on ? 'var(--teal)' : 'var(--grey-3)'}}
                         onClick={() => setHotspots(hs => on ? hs.filter(x => x !== h) : [...hs, h])}>
-                    {aaLabel(h, autoHots?.details?.resnames, data.chain)}{sc != null ? ` · ${sc.toFixed(2)}` : ''} {on ? '✓' : '+'}
+                    {label}{sc != null ? ` · ${sc.toFixed(2)}` : ''} {on ? '✓' : '+'}
                   </span>
                 );
               })}
