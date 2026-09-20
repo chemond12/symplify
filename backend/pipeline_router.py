@@ -73,6 +73,66 @@ def _detect_ligand_resnum(pdb_path: str) -> str:
     except Exception:
         pass
     return "1"
+
+def _ensure_ligand_pdb(path: str) -> str:
+    """
+    RFD3 and the _detect_ligand* helpers above need real ATOM/HETATM
+    coordinate records. A CCD ligand file fetched from RCSB's ligand
+    endpoint has no such records — just a _chem_comp_atom definition —
+    so convert it to a proper PDB with a 3D conformer first. Leaves
+    normal protein structure files (.pdb, full-structure .cif) untouched.
+    """
+    if not path.lower().endswith((".cif", ".cif.gz")):
+        return path
+
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+        import re, gzip
+        from pathlib import Path as _Path
+
+        if path.endswith(".gz"):
+            with gzip.open(path, "rt", errors="ignore") as f:
+                content = f.read()
+        else:
+            with open(path, errors="ignore") as f:
+                content = f.read()
+
+        smiles = None
+        for line in content.split("\n"):
+            line = line.strip()
+            if "SMILES_CANONICAL" in line and "CACTVS" in line:
+                m = re.search(r'"([^"]{5,})"', line)
+                if m:
+                    smiles = m.group(1)
+                    break
+        if not smiles:
+            for line in content.split("\n"):
+                line = line.strip()
+                if "SMILES" in line and not line.startswith("_"):
+                    m = re.search(r'"([A-Za-z0-9@\[\]()=#\+\-\./\\%]{5,})"', line)
+                    if m:
+                        smiles = m.group(1)
+                        break
+
+        if not smiles:
+            return path
+
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return path
+
+        mol = Chem.AddHs(mol)
+        if AllChem.EmbedMolecule(mol, AllChem.ETKDGv3()) != 0:
+            AllChem.Compute2DCoords(mol)
+        AllChem.MMFFOptimizeMolecule(mol)
+
+        out_path = str(_Path(path).with_suffix("")) + "_3d.pdb"
+        Chem.MolToPDBFile(mol, out_path)
+        return out_path
+    except Exception:
+        return path
+
 class PipelineRouter:
     def __init__(self, cfg):
         self.cfg       = cfg
@@ -106,7 +166,7 @@ class PipelineRouter:
             raise ValueError(f"Job {job_id} not found")
 
         config      = job.get("config") or {}
-        target_file = job.get("target_file", "")
+        target_file = _ensure_ligand_pdb(job.get("target_file", ""))
         config["n_designs"] = n_designs
         db.confirm_full_run(job_id, n_designs)
 
@@ -119,6 +179,7 @@ class PipelineRouter:
     # -----------------------------------------------------------------------
 
     def _submit_rfd3_pilot(self, job_id, target_file, config, job_dir, log_dir):
+        target_file  = _ensure_ligand_pdb(target_file)
         defaults     = self.defaults
         mpnn_per_bb  = config.get("mpnn_per_bb",    defaults.get("mpnn_per_backbone", 8))
         target_pass      = config.get("target_passing",    96)
@@ -292,6 +353,7 @@ class PipelineRouter:
         jid3 = self.scheduler.submit(spec3)
         db.update_stage(job_id, "rfd3_generation", "running",
                          scheduler_id=jid3)
+        db.update_stage(job_id, "ligandmpnn", "pending", scheduler_id=jid3)
 
         # Job 4: full RF3 scoring
         spec4 = JobSpec(
@@ -338,6 +400,8 @@ class PipelineRouter:
         linker_rep  = config.get("linker_repeats", defaults.get("linker_repeats", 3))
         hotspots    = config.get("hotspots", [])
         chain       = config.get("chain", "A")
+        n_designs   = config.get("n_designs", 100)
+        lengths     = config.get("lengths", [65, 150])
 
         pipeline_script = self.pipeline_dir / "bindcraft" / "pipeline_bindcraft.py"
         bc_dir          = self.paths.get("bindcraft_dir", "")
@@ -345,10 +409,22 @@ class PipelineRouter:
         bc_env          = self.envs.get("bindcraft", "BindCraft")
         res             = self.resources
 
+        # BindCraft's target_hotspot_residues wants bare residue numbers
+        # (no chain letter), comma-separated, or null if none specified —
+        # Symplify's hotspot labels are chain-prefixed (e.g. "A54").
+        hotspot_nums = [h[len(chain):] if h.startswith(chain) else h
+                        for h in hotspots]
+        hotspot_str  = ",".join(hotspot_nums) if hotspot_nums else None
+
         settings_path = str(job_dir / "bc_settings.json")
         settings = {
-            "hotspot_res": ",".join(hotspots) if hotspots else "",
-            "chain":       chain,
+            "design_path":             str(job_dir),
+            "binder_name":             f"sym_{job_id[:8]}",
+            "starting_pdb":            target_file,
+            "chains":                  chain,
+            "target_hotspot_residues": hotspot_str,
+            "lengths":                 lengths,
+            "number_of_final_designs": n_designs,
         }
         with open(settings_path, "w") as f:
             json.dump(settings, f)
@@ -357,8 +433,7 @@ class PipelineRouter:
             f"python {bc_dir}/bindcraft.py "
             f"--settings {settings_path} "
             f"--filters {bc_dir}/settings_filters/default_filters.json "
-            f"--advanced {bc_dir}/settings_advanced/default_4stage_multimer.json "
-            f"--target {target_file} "
+            f"--advanced {bc_dir}/settings_advanced/default_4stage_multimer.json"
         )
         spec1 = JobSpec(
             name        = f"sym_{job_id[:8]}_bc",
