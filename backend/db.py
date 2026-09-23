@@ -225,7 +225,8 @@ def update_stage(job_id: str, stage_name: str, status: str,
         started_at  = now if status == "running"   else None
         finished_at = now if status in ("completed", "failed") else None
         conn.execute(
-            """UPDATE stages SET status=?, scheduler_id=?,
+            """UPDATE stages SET status=?,
+               scheduler_id=COALESCE(?, scheduler_id),
                log_path=?, started_at=COALESCE(started_at, ?),
                finished_at=?
                WHERE job_id=? AND stage_name=?""",

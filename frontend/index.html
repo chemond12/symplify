@@ -2571,6 +2571,21 @@ function StatusPage({ jobId, onResults, onNewJob }) {
                     <span style={{color:'var(--teal)'}}>{job.designs_generated.full_scored}</span> fully scored
                   </span>
                 )}
+                                {job.designs_generated.pilot_rf3_scored_progress !== undefined && (
+                  <span style={{fontFamily:'var(--font-mono)', fontSize:12, color:'var(--grey-1)'}}>
+                    <span style={{color:'var(--teal)'}}>{job.designs_generated.pilot_rf3_scored_progress}</span> scoring progress
+                  </span>
+                )}
+                {job.designs_generated.bindcraft_trajectories !== undefined && (
+                  <div>
+                    <span style={{color:'var(--teal)'}}>{job.designs_generated.bindcraft_trajectories}</span> trajectories run
+                  </div>
+                )}
+                {job.designs_generated.bindcraft_accepted !== undefined && (
+                  <div>
+                    <span style={{color:'var(--teal)'}}>{job.designs_generated.bindcraft_accepted}</span> accepted designs
+                  </div>
+                )}
               </div>
             </div>
           )}

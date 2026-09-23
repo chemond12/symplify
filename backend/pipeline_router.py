@@ -74,6 +74,19 @@ def _detect_ligand_resnum(pdb_path: str) -> str:
         pass
     return "1"
 
+def _assign_chain_id(pdb_path: str, chain_id: str = "A") -> None:
+    """RDKit's MolToPDBFile leaves the chain ID column blank, which RFD3's
+    parser rejects. Stamp a chain ID onto every ATOM/HETATM record."""
+    with open(pdb_path) as f:
+        lines = f.readlines()
+    fixed = []
+    for line in lines:
+        if line.startswith(("ATOM", "HETATM")) and len(line) > 21:
+            line = line[:21] + chain_id + line[22:]
+        fixed.append(line)
+    with open(pdb_path, "w") as f:
+        f.writelines(fixed)
+
 def _ensure_ligand_pdb(path: str) -> str:
     """
     RFD3 and the _detect_ligand* helpers above need real ATOM/HETATM
@@ -129,6 +142,7 @@ def _ensure_ligand_pdb(path: str) -> str:
 
         out_path = str(_Path(path).with_suffix("")) + "_3d.pdb"
         Chem.MolToPDBFile(mol, out_path)
+        _assign_chain_id(out_path, chain_id="Z")
         return out_path
     except Exception:
         return path
@@ -153,6 +167,7 @@ class PipelineRouter:
         log_dir = str(job_dir / "logs")
 
         if target_type == "small_molecule":
+            target_file = _ensure_ligand_pdb(target_file)
             self._submit_rfd3_pilot(job_id, target_file, config,
                                      job_dir, log_dir)
         else:
@@ -240,7 +255,7 @@ class PipelineRouter:
             f"--output_dir {job_dir} "
             f"--n_designs 100 "
             f"--mpnn_per_bb {mpnn_per_bb} "
-            f"--skip_rf3"
+            f"--skip_rf3 --stop_after mpnn"
         )
         spec1 = JobSpec(
             name        = f"sym_{job_id[:8]}_pilot_gen",
@@ -391,10 +406,111 @@ class PipelineRouter:
         db.update_stage(job_id, "post_processing", "pending",
                          scheduler_id=jid5)
 
+    def resubmit_stage(self, job_id, stage_name):
+        """
+        Resubmit a timed-out stage. RFD3 has skip_existing=True by default,
+        so resubmitting the identical generation command against the same
+        out_dir picks up where it left off rather than regenerating designs
+        already written to disk.
+        """
+        job = db.get_job(job_id)
+        if not job:
+            raise ValueError(f"Job {job_id} not found")
+
+        config      = job.get("config") or {}
+        target_file = job.get("target_file", "")
+        job_dir     = self.workspace / job_id
+        log_dir     = str(job_dir / "logs")
+
+        if stage_name == "bindcraft_design":
+            return self._resubmit_bindcraft(job_id, job, job_dir, log_dir)
+
+        if stage_name != "rfd3_generation":
+            raise NotImplementedError(
+                f"Resubmit not implemented for stage '{stage_name}' yet — "
+                f"only rfd3_generation and bindcraft_design are currently supported."
+            )
+
+        n_designs    = config.get("n_designs", 5000)
+        mpnn_per_bb  = config.get("mpnn_per_bb", self.defaults.get("mpnn_per_backbone", 8))
+        linker_rep   = config.get("linker_repeats", self.defaults.get("linker_repeats", 3))
+        pipeline_script = self.pipeline_dir / "rfd3" / "pipeline_rfd3.py"
+        rfd3_cfg_path   = str(job_dir / "rfd3_config.json")
+
+        env_vars = {
+            "CCD_MIRROR_PATH":         self.paths.get("ccd_mirror", ""),
+            "RFD3_CHECKPOINT":         self.paths.get("rfd3_checkpoint",
+                                       "/scratch/network/ch8337/foundry_weights/rfd3_latest.ckpt"),
+            "FOUNDRY_CHECKPOINT_DIRS": self.paths.get("foundry_weights_dir",
+                                       "/scratch/network/ch8337/foundry_weights"),
+        }
+        res = self.resources
+        base_cmd = (
+            f"python {pipeline_script} "
+            f"--config {rfd3_cfg_path} "
+            f"--input_pdb {target_file} "
+            f"--output_dir {job_dir}/full_run "
+            f"--n_designs {n_designs} "
+            f"--mpnn_per_bb {mpnn_per_bb} "
+            f"--linker_repeats {linker_rep} "
+            f"--workers ${{SLURM_CPUS_PER_TASK:-32}}"
+        )
+
+        spec = JobSpec(
+            name        = f"sym_{job_id[:8]}_gen_resume",
+            command     = base_cmd + " --skip_rf3 --stop_after mpnn",
+            log_dir     = log_dir,
+            gpus        = res.get("rfd3_generation", {}).get("gpus", 1),
+            cpus        = res.get("rfd3_generation", {}).get("cpus", 8),
+            mem_gb      = res.get("rfd3_generation", {}).get("mem_gb", 64),
+            hours       = res.get("rfd3_generation", {}).get("hours", 24),
+            env_vars    = env_vars,
+            conda_env   = self.envs.get("rfd3", "rfd3"),
+            module_load = self.envs.get("base_module", ""),
+        )
+        new_jid = self.scheduler.submit(spec)
+        print(f"[pipeline_router] Resubmitted rfd3_generation for job {job_id}: {new_jid}", flush=True)
+        return new_jid
+
     # -----------------------------------------------------------------------
     # BindCraft (Jobs 1 + 2) — unchanged
     # -----------------------------------------------------------------------
 
+    def _resubmit_bindcraft(self, job_id, job, job_dir, log_dir):
+        """
+        BindCraft's check_accepted_designs() counts files actually present
+        in Accepted/ on every run, so resubmitting the same settings file
+        against the same design_path resumes toward number_of_final_designs
+        rather than restarting the count from zero.
+        """
+        settings_path = str(job_dir / "bc_settings.json")
+        target_file   = job.get("target_file", "")
+        bc_dir        = self.paths.get("bindcraft_dir", "")
+        module        = self.envs.get("base_module", "")
+        bc_env        = self.envs.get("bindcraft", "BindCraft")
+        res           = self.resources
+
+        bc_cmd = (
+            f"python {bc_dir}/bindcraft.py "
+            f"--settings {settings_path} "
+            f"--filters {bc_dir}/settings_filters/default_filters.json "
+            f"--advanced {bc_dir}/settings_advanced/default_4stage_multimer.json"
+        )
+        spec = JobSpec(
+            name        = f"sym_{job_id[:8]}_bc_resume",
+            command     = bc_cmd,
+            log_dir     = log_dir,
+            gpus        = res.get("bindcraft", {}).get("gpus", 1),
+            cpus        = res.get("bindcraft", {}).get("cpus", 8),
+            mem_gb      = res.get("bindcraft", {}).get("mem_gb", 64),
+            hours       = res.get("bindcraft", {}).get("hours", 48),
+            conda_env   = bc_env,
+            module_load = module,
+        )
+        new_jid = self.scheduler.submit(spec)
+        print(f"[pipeline_router] Resubmitted bindcraft_design for job {job_id}: {new_jid}", flush=True)
+        return new_jid
+    
     def _submit_bindcraft(self, job_id, target_file, config, job_dir, log_dir):
         defaults    = self.defaults
         linker_rep  = config.get("linker_repeats", defaults.get("linker_repeats", 3))
