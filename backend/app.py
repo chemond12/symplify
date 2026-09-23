@@ -18,6 +18,7 @@ API routes:
 
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -159,6 +160,16 @@ def get_job(job_id):
             elif live.state == "FAILED" and stage["status"] != "failed":
                 db.update_stage(job_id, stage["stage_name"], "failed")
                 stage["status"] = "failed"
+            elif live.state == "TIMEOUT" and stage["status"] != "timeout_resubmitted":
+                print(f"[app] Stage {stage['stage_name']} for job {job_id} timed out — resubmitting", flush=True)
+                try:
+                    new_jid = router.resubmit_stage(job_id, stage["stage_name"])
+                    db.update_stage(job_id, stage["stage_name"], "running", scheduler_id=str(new_jid))
+                    stage["status"] = "running"
+                except Exception as e:
+                    print(f"[app] ERROR resubmitting {stage['stage_name']} for job {job_id}: {e}", flush=True)
+                    db.update_stage(job_id, stage["stage_name"], "timeout_resubmitted")
+                    stage["status"] = "timeout_resubmitted"
             elif live.state == "PENDING" and stage["status"] not in ("pending", "running"):
                 db.update_stage(job_id, stage["stage_name"], "pending")
                 stage["status"] = "pending"
@@ -171,12 +182,11 @@ def get_job(job_id):
             pass
 
     # Count designs generated so far by scanning workspace output dirs
-    job["designs_generated"] = _count_designs(job_id, job.get("status"))
-
+    job["designs_generated"] = _count_designs(job_id, job.get("status"), stages)
     return jsonify(job)
 
 
-def _count_designs(job_id: str, status: str) -> dict:
+def _count_designs(job_id: str, status: str, stages: list) -> dict:
     """
     Count designs at each stage by scanning output directories.
     Returns dict with counts for each stage that has outputs.
@@ -228,6 +238,31 @@ def _count_designs(job_id: str, status: str) -> dict:
             counts["full_scored"] = len(data)
         except Exception:
             pass
+
+        # BindCraft trajectories
+    bc_relaxed_dir = job_dir / "Trajectory" / "Relaxed"
+    if bc_relaxed_dir.exists():
+        counts["bindcraft_trajectories"] = len(list(bc_relaxed_dir.glob("*.pdb")))
+
+    bc_accepted_dir = job_dir / "Accepted"
+    if bc_accepted_dir.exists():
+        counts["bindcraft_accepted"] = len(list(bc_accepted_dir.glob("*.pdb")))
+
+    # Pilot RF3 scoring progress (parsed from stdout log, written incrementally)
+    if stages:
+        rf3_stage = next((s for s in stages if s.get("stage_name") == "pilot_rf3_scoring"), None)
+        if rf3_stage and rf3_stage.get("scheduler_id"):
+            log_files = glob.glob(str(job_dir / "logs" / f"sym_{job_id[:8]}_pilot_rf3_*.out"))
+            if log_files:
+                try:
+                    with open(log_files[0]) as f:
+                        content = f.read()
+                    matches = re.findall(r"\[(\d+)/(\d+)\] scored", content)
+                    if matches:
+                        last_scored, total = matches[-1]
+                        counts["pilot_rf3_scored_progress"] = f"{last_scored}/{total}"
+                except Exception:
+                    pass
 
     return counts
 

@@ -118,7 +118,7 @@ class SLURMScheduler(BaseScheduler):
         if spec.extra_flags:
             header.append(f"#SBATCH {spec.extra_flags}")
 
-        body = ["", "set -euo pipefail", ""]
+        body = ["", "set -eo pipefail", ""]
         if spec.module_load:
             body.append(f"module load {spec.module_load}")
         if spec.conda_env:
@@ -135,6 +135,7 @@ class SLURMScheduler(BaseScheduler):
                                          delete=False) as f:
             f.write(script)
             tmp = f.name
+        print(f"[SLURMScheduler] wrote job script to {tmp}", flush=True)
         try:
             result = subprocess.run(
                 ["sbatch", tmp],

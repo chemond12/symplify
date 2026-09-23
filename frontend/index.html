@@ -1773,67 +1773,91 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
             });
           }
 
-          // Highlight the currently selected hotspots/cluster in gold,
-          // drawn on top of the score-band coloring above so it's visible.
+                    // Outline the currently selected hotspots/cluster with a translucent
+          // halo surface — leaves the underlying score-band color untouched.
           if (selected && selected.length > 0) {
             const selResis = selected
               .filter(r => r.startsWith(chain))
               .map(r => parseInt(r.slice(chain.length)));
             if (selResis.length > 0) {
-              viewer.setStyle(
-                { chain, resi: selResis },
-                {
-                  cartoon: { color: '#FFD447' },
-                  stick:   { radius: 0.22, color: '#FFD447' },
-                  sphere:  { radius: 0.4,  color: '#FFD447' },
-                }
-              );
+              try {
+                viewer.addSurface(window.$3Dmol.SurfaceType.VDW, {
+                  opacity: 0.55,
+                  color: '#FFD447',
+                }, { chain, resi: selResis });
+              } catch (e) {
+                console.error('[HotspotViewer] addSurface failed:', e);
+              }
             }
           }
 
           // Hover tooltip: one-letter code + residue number
-          viewer.setHoverable(
-            { chain },
-            true,
-            (atom) => {
-              if (!atom.label) {
-                const code = AA3TO1[atom.resn] || atom.resn || '';
-                atom.label = viewer.addLabel(`${code}${atom.resi}`, {
-                  position: atom,
-                  backgroundColor: '#0B1628',
-                  backgroundOpacity: 0.85,
-                  fontColor: '#EAF2FF',
-                  fontSize: 12,
-                  borderColor: '#00C2B2',
-                  borderThickness: 1,
-                });
+          try {
+            viewer.setHoverable(
+              { chain },
+              true,
+              (atom) => {
+                console.log('[HotspotViewer] hover fired:', atom.chain, atom.resi, atom.resn);
+                if (!atom.label) {
+                  const code = AA3TO1[atom.resn] || atom.resn || '';
+                  atom.label = viewer.addLabel(`${code}${atom.resi}`, {
+                    position: atom,
+                    backgroundColor: '#0B1628',
+                    backgroundOpacity: 0.85,
+                    fontColor: '#EAF2FF',
+                    fontSize: 12,
+                    borderColor: '#00C2B2',
+                    borderThickness: 1,
+                  });
+                }
+              },
+              (atom) => {
+                if (atom.label) {
+                  viewer.removeLabel(atom.label);
+                  delete atom.label;
+                }
               }
-            },
-            (atom) => {
-              if (atom.label) {
-                viewer.removeLabel(atom.label);
-                delete atom.label;
-              }
-            }
-          );
+            );
+          } catch (e) {
+            console.error('[HotspotViewer] setHoverable threw:', e);
+          }
         } else {
           // Small molecule — base stick style for all atoms
           viewer.setStyle({}, {
             stick: { colorscheme: 'Jmol', radius: 0.12 },
           });
 
-          // Highlight pharmacophoric hotspot atoms with teal color
+                    // All RDKit-identified pharmacophore atoms get a subtle teal tint,
+          // whether or not they're currently selected.
           const topAtoms = (scores && scores.top_atoms) ? scores.top_atoms : [];
           if (topAtoms.length > 0) {
             topAtoms.forEach(idx => {
               viewer.setStyle(
                 { serial: idx + 1 },
                 {
-                  stick:  { color: '#00C2B2', radius: 0.18 },
-                  sphere: { color: '#00C2B2', radius: 0.32 },
+                  stick:  { colorscheme: 'Jmol', radius: 0.16 },
+                  sphere: { color: '#00C2B2', radius: 0.22 },
                 }
               );
             });
+          }
+
+          // Outline the currently SELECTED atoms with a gold halo — same
+          // visual language as the protein cluster highlight.
+          if (selected && selected.length > 0) {
+            const selIndices = selected
+              .map(h => parseInt(String(h).replace(/^[A-Za-z]+/, ''), 10))
+              .filter(n => !Number.isNaN(n));
+            if (selIndices.length > 0) {
+              try {
+                viewer.addSurface(window.$3Dmol.SurfaceType.VDW, {
+                  opacity: 0.55,
+                  color: '#FFD447',
+                }, { serial: selIndices.map(i => i + 1) });
+              } catch (e) {
+                console.error('[HotspotViewer] addSurface (small molecule) failed:', e);
+              }
+            }
           }
         }
 
@@ -1941,7 +1965,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
                 note: `PESTO: ${highCount} high-confidence hotspots (max score ${maxScore.toFixed(2)})`,
               }
             },
-            overall: Math.max(5, (d.overall || 50) - 15),
+            overall: Math.min(95, (d.overall || 50) + 15),
             warnings: (d.warnings || []).filter(w => !w.includes('hotspot')),
           }));
         }
@@ -1951,7 +1975,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
   }, []);
 
   const score    = difficulty.overall || 0;
-  const grade    = score < 25 ? 'Easy' : score < 50 ? 'Medium' : score < 70 ? 'Hard' : 'Very Hard';
+  const grade    = score > 75 ? 'Easy' : score > 50 ? 'Medium' : score > 30 ? 'Hard' : 'Very Hard';
   const gradeCol = grade === 'Easy' ? 'var(--green)' : grade === 'Medium' ? 'var(--amber)' :
                    grade === 'Hard' ? '#FF8C42' : 'var(--red)';
 
@@ -2184,7 +2208,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
               PeSTo scored {autoHots.hotspots.length} interface residues and grouped them into{' '}
               {autoHots.details?.clusters?.length || 0} spatial clusters — the highest-ranked cluster is
               pre-selected below. BindCraft works best with a{' '}
-              <strong style={{color:'var(--teal)'}}>focused set of 3–5</strong>; remove lower-scoring ones (×) to tighten it.
+              <strong style={{color:'var(--teal)'}}>focused set of 3–10</strong>; remove lower-scoring ones (×) to tighten it.
             </>
           ) : (
             <>
@@ -2192,7 +2216,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
               pre-selected below. Remove ones you don't want (×) and re-add them anytime from the full list below.
             </>
           )}
-          {hotspots.length > 6 && (
+          {hotspots.length > 10 && (
             <span style={{color:'var(--amber)', display:'block', marginTop:4}}>
               ⚠ {hotspots.length} selected is a lot — too many hotspots can prevent any designs from succeeding.
             </span>
@@ -2546,6 +2570,21 @@ function StatusPage({ jobId, onResults, onNewJob }) {
                   <span style={{fontFamily:'var(--font-mono)', fontSize:12, color:'var(--grey-1)'}}>
                     <span style={{color:'var(--teal)'}}>{job.designs_generated.full_scored}</span> fully scored
                   </span>
+                )}
+                                {job.designs_generated.pilot_rf3_scored_progress !== undefined && (
+                  <span style={{fontFamily:'var(--font-mono)', fontSize:12, color:'var(--grey-1)'}}>
+                    <span style={{color:'var(--teal)'}}>{job.designs_generated.pilot_rf3_scored_progress}</span> scoring progress
+                  </span>
+                )}
+                {job.designs_generated.bindcraft_trajectories !== undefined && (
+                  <div>
+                    <span style={{color:'var(--teal)'}}>{job.designs_generated.bindcraft_trajectories}</span> trajectories run
+                  </div>
+                )}
+                {job.designs_generated.bindcraft_accepted !== undefined && (
+                  <div>
+                    <span style={{color:'var(--teal)'}}>{job.designs_generated.bindcraft_accepted}</span> accepted designs
+                  </div>
                 )}
               </div>
             </div>

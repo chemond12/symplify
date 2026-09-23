@@ -350,14 +350,17 @@ def _load_molecule(path: str):
 
 def _build_report(overall: float, factors: dict,
                    warnings: list, target_type: str) -> DifficultyReport:
-    overall = round(overall, 1)
-    if overall < 25:
+    # `overall` coming in is raw difficulty (higher = harder) — used to pick
+    # a grade and design budget. The number we report back should read as
+    # a quality score instead (higher = better target), so invert it here.
+    raw_difficulty = round(overall, 1)
+    if raw_difficulty < 25:
         grade = "Easy"
         n_designs = 2000
-    elif overall < 50:
+    elif raw_difficulty < 50:
         grade = "Medium"
         n_designs = 5000
-    elif overall < 70:
+    elif raw_difficulty < 70:
         grade = "Hard"
         n_designs = 10000
     else:
@@ -365,7 +368,7 @@ def _build_report(overall: float, factors: dict,
         n_designs = 20000
 
     return DifficultyReport(
-        overall            = overall,
+        overall            = round(100 - raw_difficulty, 1),
         grade              = grade,
         factors            = factors,
         recommended_designs = n_designs,
