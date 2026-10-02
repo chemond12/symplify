@@ -26,6 +26,26 @@ class HotspotResult:
 # Protein hotspots
 # ---------------------------------------------------------------------------
 
+def _compute_sasa(pdb_path, target_chain):
+    """Per-residue apolar (hydrophobic) + total SASA via freesasa, keyed by
+    res_id_str (chain+resnum). Returns {} if freesasa is unavailable."""
+    try:
+        import freesasa
+        result = freesasa.calc(freesasa.Structure(pdb_path))
+        areas = result.residueAreas()
+    except Exception:
+        return {}
+    out = {}
+    for chain, residues in areas.items():
+        if target_chain and chain != target_chain:
+            continue
+        for resnum, area in residues.items():
+            out[f"{chain}{str(resnum).strip()}"] = {
+                "apolar": round(area.apolar, 1),
+                "total":  round(area.total, 1),
+            }
+    return out
+
 def find_protein_hotspots(pdb_path: str, chain: str = "A",
                            pesto_dir: Optional[str] = None,
                            pesto_env: str = "pesto") -> HotspotResult:
@@ -131,6 +151,7 @@ def _run_pesto(pdb_path: str, chain: str, pesto_dir: str,
                 "resnames":          resnames,
                 "clusters":          data.get("clusters", []),
                 "coords":            data.get("coords", {}),
+                "sasa":              _compute_sasa(pdb_path, chain),
                 "threshold":         data.get("threshold", 0.5),
                 "model":             data.get("model", "i_v4_1"),
                 "n_residues_scored": len(data.get("residues", [])),

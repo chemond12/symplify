@@ -118,26 +118,30 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None) -> Dif
         "unit": "Rg / ideal", "note": f"Compactness {rg_ratio:.2f} (1.0 = ideal globular)",
     }
 
-    # Factor 4: Epitope chemistry — hydrophobic epitopes design best; polar/charged
-    # ones are the hardest (Cao & Baker 2022). Needs hotspots to evaluate.
-    HYDRO = set("AVLIMFWYC")
-    AA3TO1 = {'ALA':'A','VAL':'V','LEU':'L','ILE':'I','MET':'M','PHE':'F','TRP':'W','TYR':'Y','CYS':'C',
-              'GLY':'G','PRO':'P','SER':'S','THR':'T','ASN':'N','GLN':'Q','ASP':'D','GLU':'E','LYS':'K','ARG':'R','HIS':'H'}
+    # Factor 4: Epitope chemistry — apolar (hydrophobic) fraction of the hotspot
+    # patch's SASA (freesasa). Hydrophobic surface = binder anchor; charged rim
+    # residues expose mostly polar surface, so the fraction respects the O-ring.
     if hotspot_residues:
-        hs_aas = [AA3TO1.get(res.resname, 'X') for res in residues
-                  if f"{res.parent.id}{res.id[1]}" in hotspot_residues]
-        if hs_aas:
-            frac_hydro = sum(1 for a in hs_aas if a in HYDRO) / len(hs_aas)
-            if frac_hydro >= 0.4:
-                chem_score = 15
-            elif frac_hydro >= 0.3:
-                chem_score = 40
-            else:
-                chem_score = 70
-                warnings.append("Epitope is mostly polar/charged — hydrophobic contacts are limited, which lowers binder hit rates")
-            factors["epitope_chemistry"] = {
-                "score": chem_score, "value": round(100 * frac_hydro),
-                "unit": "% hydrophobic", "note": f"{round(100 * frac_hydro)}% of hotspots hydrophobic",
+        try:
+            import freesasa
+            areas = freesasa.calc(freesasa.Structure(pdb_path)).residueAreas()
+        except Exception:
+            areas = None
+        if areas:
+            ap = tot = 0.0
+            for res in residues:
+                if f"{res.parent.id}{res.id[1]}" in hotspot_residues:
+                    a = areas.get(res.parent.id, {}).get(str(res.id[1]))
+                    if a:
+                        ap += a.apolar; tot += a.total
+            if tot > 0:
+                frac = ap / tot
+                chem_score = 15 if frac >= 0.60 else 30 if frac >= 0.45 else 45 if frac >= 0.30 else 70
+                if frac < 0.30:
+                    warnings.append("Epitope exposes mostly polar surface — few hydrophobic anchors, which lowers binder hit rates")
+                factors["epitope_chemistry"] = {
+                "score": chem_score, "value": round(100 * frac),
+                "unit": "% hydrophobic surface", "note": f"{round(100 * frac)}% hydrophobic surface",
             }
 
     # Factor 5: Hotspot patch — how tight the selected hotspots are (max CA–CA

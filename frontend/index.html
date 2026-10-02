@@ -1938,26 +1938,29 @@ function DifficultyPage({ data, onBack, onSubmit }) {
       else if (r.details?.clusters?.length) {
         setHotspots(r.details.clusters[0].residues);
       }
+      setLoadingH(false);
+    }).catch(() => setLoadingH(false));
+  }, []);
 
-      // Re-score chemistry + hotspot patch now that PeSTo gave us hotspots + coords.
-      if (targetType === 'protein' && r.method === 'pesto' && r.details?.coords) {
-        const HYDRO = new Set(['A','V','L','I','M','F','W','Y','C']);
-        const AA3 = {ALA:'A',VAL:'V',LEU:'L',ILE:'I',MET:'M',PHE:'F',TRP:'W',TYR:'Y',CYS:'C',
-                     GLY:'G',PRO:'P',SER:'S',THR:'T',ASN:'N',GLN:'Q',ASP:'D',GLU:'E',LYS:'K',ARG:'R',HIS:'H'};
-        const resn = r.details?.resnames || {};
-        const sel  = (r.details?.coords && r.details?.scores)
-          ? compactPatch(r.details.scores, r.details.coords)
-          : (r.details?.clusters?.[0]?.residues || r.hotspots || []);
-        setDifficulty(d => {
+  // Recompute epitope chemistry + hotspot patch live as the selection changes.
+  useEffect(() => {
+    if (!autoHots || autoHots.method !== 'pesto') return;
+    const coords = autoHots.details?.coords || {};
+    const sasa   = autoHots.details?.sasa   || {};
+    const sel    = hotspots;
+    setDifficulty(d => {
           const factors = { ...d.factors };
-          const aas = sel.map(h => AA3[resn[h]] || '').filter(Boolean);
-          if (aas.length) {
-            const frac = aas.filter(a => HYDRO.has(a)).length / aas.length;
-            const s = frac >= 0.4 ? 15 : frac >= 0.25 ? 40 : 70;
+          // Epitope chemistry: apolar (hydrophobic) fraction of the patch's SASA (freesasa)
+          let ap = 0, totSasa = 0;
+          sel.forEach(h => { const a = sasa[h]; if (a) { ap += a.apolar; totSasa += a.total; } });
+          if (totSasa > 0) {
+            const frac = ap / totSasa;
+            const s = frac >= 0.60 ? 15 : frac >= 0.45 ? 30 : frac >= 0.30 ? 45 : 70;
             factors.epitope_chemistry = { score: s, value: Math.round(100*frac),
-              unit: '% hydrophobic', note: `${Math.round(100*frac)}% of hotspots hydrophobic` };
+              unit: '% hydrophobic surface', note: `${Math.round(100*frac)}% hydrophobic surface` };
           }
-          const pts = sel.map(h => r.details.coords[h]).filter(Boolean);
+          // Hotspot patch — max Cα–Cα spread of the selection
+          const pts = sel.map(h => coords[h]).filter(Boolean);
           if (pts.length >= 2) {
             let mx = 0;
             for (let i=0;i<pts.length;i++) for (let j=i+1;j<pts.length;j++)
@@ -1968,18 +1971,14 @@ function DifficultyPage({ data, onBack, onSubmit }) {
           }
           const W = { epitope_chemistry:0.30, hotspot_patch:0.25, flexibility:0.20, globularity:0.15, target_size:0.10 };
           const present = Object.keys(W).filter(k => factors[k]);
-          const tot = present.reduce((a,k)=>a+W[k],0) || 1;
-          const overall = present.reduce((a,k)=>a + factors[k].score*(W[k]/tot), 0);
-          return { ...d, factors, overall: Math.round(overall*10)/10,
-                   warnings: (d.warnings||[]).filter(w => !w.toLowerCase().includes('hotspot')) };
+          const wtot = present.reduce((a,k)=>a+W[k],0) || 1;
+          const overall = present.reduce((a,k)=>a + factors[k].score*(W[k]/wtot), 0);
+          return { ...d, factors, overall: Math.round(overall*10)/10 };
         });
-      }
-      setLoadingH(false);
-    }).catch(() => setLoadingH(false));
-  }, []);
+      }, [hotspots, autoHots]);
 
   const score    = difficulty.overall || 0;
-  const grade    = score < 25 ? 'Easy' : score < 50 ? 'Medium' : score < 70 ? 'Hard' : 'Very Hard';
+  const grade    = score < 25 ? 'Easy' : score < 45 ? 'Doable' : score < 60 ? 'Medium' : score < 75 ? 'Hard' : 'Very Hard';
   const gradeCol = grade === 'Easy' ? 'var(--green)' : grade === 'Doable' ? 'var(--teal)' : grade === 'Medium' ? 'var(--amber)' :
                    grade === 'Hard' ? '#FF8C42' : 'var(--red)';
 
