@@ -62,29 +62,30 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None) -> Dif
     factors = {}
     warnings = []
 
-    # Factor 1: Target size
+    # Factor 1: Target size — RELAXED. Size barely affects designability in the
+    # normal range; only genuine extremes matter (Cao & Baker; BindCraft targets
+    # routinely include ~100 aa cytokines).
     n_residues = len(residues)
-    if n_residues < 50:
-        size_score = 80
-        warnings.append("Very small target — limited surface area for binder contacts")
-    elif n_residues < 100:
-        size_score = 50
-    elif n_residues < 300:
+    if n_residues < 40:
+        size_score = 55
+        warnings.append("Very small target (<40 aa) — limited surface for binder contacts")
+    elif n_residues <= 120:
+        size_score = 10            # normal range — essentially not a difficulty driver
+    elif n_residues <= 250:
         size_score = 20
+    elif n_residues <= 500:
+        size_score = 30
+    elif n_residues <= 800:
+        size_score = 45
     else:
-        size_score = 10
+        size_score = 55
     factors["target_size"] = {
-        "score": size_score,
-        "value": n_residues,
-        "unit": "residues",
-        "note": f"{n_residues} residues"
+        "score": size_score, "value": n_residues,
+        "unit": "residues", "note": f"{n_residues} residues",
     }
 
-    # Factor 2: B-factor (flexibility proxy)
-    bfactors = []
-    for res in residues:
-        for atom in res:
-            bfactors.append(atom.bfactor)
+    # Factor 2: Flexibility (mean B-factor)
+    bfactors = [atom.bfactor for res in residues for atom in res]
     mean_bfactor = float(sum(bfactors) / len(bfactors)) if bfactors else 20.0
     if mean_bfactor > 50:
         flex_score = 75
@@ -94,46 +95,85 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None) -> Dif
     else:
         flex_score = 15
     factors["flexibility"] = {
-        "score": flex_score,
-        "value": round(mean_bfactor, 1),
-        "unit": "mean B-factor (Å²)",
-        "note": f"Mean B-factor: {mean_bfactor:.1f} Å²"
+        "score": flex_score, "value": round(mean_bfactor, 1),
+        "unit": "mean B-factor (Å²)", "note": f"Mean B-factor: {mean_bfactor:.1f} Å²",
     }
 
-    # Factor 3: Surface groove depth (concave = easier, flat = harder)
-    # Proxy: variance in pairwise Cα distances among hotspot residues
-    if hotspot_residues and len(hotspot_residues) >= 3:
-        import numpy as np
-        hs_coords = []
-        for res in residues:
-            res_id = f"{res.parent.id}{res.id[1]}"
-            if res_id in hotspot_residues:
-                hs_coords.append(res["CA"].get_vector().get_array())
-        if len(hs_coords) >= 3:
-            hs_arr = np.array(hs_coords)
-            centroid = hs_arr.mean(axis=0)
-            spread = float(np.std(np.linalg.norm(hs_arr - centroid, axis=1)))
-            if spread < 5:
-                groove_score = 70
-                warnings.append("Hotspot residues are tightly clustered — may indicate flat binding surface")
-            elif spread < 10:
-                groove_score = 35
-            else:
-                groove_score = 15
-        else:
-            groove_score = 40
+    # Factor 3: Globularity — compact globular folds are easier; extended or
+    # disordered chains are much harder (Science 2024, IDR binders). Rg vs the
+    # expected Rg of a globular protein of the same length (~2.2 * N^0.38 Å).
+    ca = np.array(ca_coords)
+    rg = float(np.sqrt(np.mean(np.sum((ca - ca.mean(axis=0)) ** 2, axis=1))))
+    rg_expected = 2.2 * (n_residues ** 0.38)
+    rg_ratio = rg / rg_expected if rg_expected else 1.0
+    if rg_ratio > 1.7:
+        glob_score = 70
+        warnings.append("Target is extended / non-globular — likely flexible or disordered, harder to design against")
+    elif rg_ratio > 1.3:
+        glob_score = 40
     else:
-        groove_score = 40   # unknown without hotspots
-    factors["binding_site_topology"] = {
-        "score": groove_score,
-        "value": None,
-        "unit": None,
-        "note": "Estimated from hotspot geometry" if hotspot_residues else "Unknown (no hotspots specified)"
+        glob_score = 15
+    factors["globularity"] = {
+        "score": glob_score, "value": round(rg_ratio, 2),
+        "unit": "Rg / ideal", "note": f"Compactness {rg_ratio:.2f} (1.0 = ideal globular)",
     }
 
-    # Compute overall
-    weights = {"target_size": 0.25, "flexibility": 0.35, "binding_site_topology": 0.40}
-    overall = sum(factors[k]["score"] * weights[k] for k in weights)
+    # Factor 4: Epitope chemistry — apolar (hydrophobic) fraction of the hotspot
+    # patch's SASA (freesasa). Hydrophobic surface = binder anchor; charged rim
+    # residues expose mostly polar surface, so the fraction respects the O-ring.
+    if hotspot_residues:
+        try:
+            import freesasa
+            areas = freesasa.calc(freesasa.Structure(pdb_path)).residueAreas()
+        except Exception:
+            areas = None
+        if areas:
+            ap = tot = 0.0
+            for res in residues:
+                if f"{res.parent.id}{res.id[1]}" in hotspot_residues:
+                    a = areas.get(res.parent.id, {}).get(str(res.id[1]))
+                    if a:
+                        ap += a.apolar; tot += a.total
+            if tot > 0:
+                frac = ap / tot
+                chem_score = 15 if frac >= 0.60 else 30 if frac >= 0.45 else 45 if frac >= 0.30 else 70
+                if frac < 0.30:
+                    warnings.append("Epitope exposes mostly polar surface — few hydrophobic anchors, which lowers binder hit rates")
+                factors["epitope_chemistry"] = {
+                "score": chem_score, "value": round(100 * frac),
+                "unit": "% hydrophobic surface", "note": f"{round(100 * frac)}% hydrophobic surface",
+            }
+
+    # Factor 5: Hotspot patch — how tight the selected hotspots are (max CA–CA
+    # spread). A single binding site spans ~30 Å; tighter is easier.
+    if hotspot_residues:
+        hs = [res["CA"].get_vector().get_array() for res in residues
+              if f"{res.parent.id}{res.id[1]}" in hotspot_residues]
+        if len(hs) >= 2:
+            arr = np.array(hs); spread = 0.0
+            for i in range(len(arr)):
+                for j in range(i + 1, len(arr)):
+                    spread = max(spread, float(np.linalg.norm(arr[i] - arr[j])))
+            patch_score = 15 if spread <= 20 else 40 if spread <= 30 else 70
+            if spread > 30:
+                warnings.append("Hotspots span more than one binding site — a single binder can't reach them all")
+            factors["hotspot_patch"] = {
+                "score": patch_score, "value": round(spread, 1),
+                "unit": "Å spread", "note": f"Hotspots span {spread:.1f} Å",
+            }
+        else:
+            factors["hotspot_patch"] = {"score": 40, "value": None, "unit": None,
+                                        "note": "Pending hotspot selection"}
+    else:
+        factors["hotspot_patch"] = {"score": 40, "value": None, "unit": None,
+                                    "note": "Pending hotspot selection"}
+
+    # Compute overall — weight by importance, renormalized over available factors
+    base_weights = {"epitope_chemistry": 0.30, "hotspot_patch": 0.25,
+                    "flexibility": 0.20, "globularity": 0.15, "target_size": 0.10}
+    present = {k: w for k, w in base_weights.items() if k in factors}
+    tot = sum(present.values()) or 1.0
+    overall = sum(factors[k]["score"] * (present[k] / tot) for k in present)
 
     return _build_report(overall, factors, warnings, "protein")
 
@@ -350,17 +390,17 @@ def _load_molecule(path: str):
 
 def _build_report(overall: float, factors: dict,
                    warnings: list, target_type: str) -> DifficultyReport:
-    # `overall` coming in is raw difficulty (higher = harder) — used to pick
-    # a grade and design budget. The number we report back should read as
-    # a quality score instead (higher = better target), so invert it here.
-    raw_difficulty = round(overall, 1)
-    if raw_difficulty < 25:
+    overall = round(overall, 1)
+    if overall < 25:
         grade = "Easy"
         n_designs = 2000
-    elif raw_difficulty < 50:
+    elif overall < 45:
+        grade = "Doable"
+        n_designs = 3000
+    elif overall < 60:
         grade = "Medium"
         n_designs = 5000
-    elif raw_difficulty < 70:
+    elif overall < 70:
         grade = "Hard"
         n_designs = 10000
     else:
@@ -368,7 +408,7 @@ def _build_report(overall: float, factors: dict,
         n_designs = 20000
 
     return DifficultyReport(
-        overall            = round(100 - raw_difficulty, 1),
+        overall            = overall,
         grade              = grade,
         factors            = factors,
         recommended_designs = n_designs,
