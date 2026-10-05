@@ -492,11 +492,8 @@
   }
 
   .warnings-box {
-    background: var(--amber-dim);
-    border: 1px solid var(--amber);
-    border-radius: var(--radius);
-    padding: 16px 20px;
     margin-bottom: 24px;
+    color: var(--amber);
   }
 
   .warnings-box h4 {
@@ -518,7 +515,7 @@
     padding: 3px 0;
   }
 
-  .warnings-box li::before { content: "⚠ "; color: var(--amber); }
+  .warnings-box li::before { content: " "; }
 
   .action-row {
     display: flex;
@@ -1468,7 +1465,7 @@ function UploadPage({ onNext }) {
       }
       onNext({ file, jobName, targetType, chain, hotspots,
                linkerRep,
-               nDesigns: nDesigns || (targetType === 'protein' ? 100 : null),
+               nDesigns: nDesigns || (targetType === 'protein' ? 96 : null),
                targetPass,
                thresholds: { iptm: iptmThresh, ptm: ptmThresh, plddt,
                              rmsd, dg, delta_unsat_hbonds: unsatHbonds,
@@ -1498,7 +1495,7 @@ function UploadPage({ onNext }) {
         <div className="field-group" style={{marginBottom:16}}>
           <span className="field-label">Fetch from RCSB</span>
           <div className="input-row">
-            <input className="input" placeholder="PDB ID (e.g. 1KDM) or ligand code (e.g. 7V7)"
+            <input className="input" placeholder="PDB ID (e.g. 1KDM) or ligand (e.g. 7V7)"
                    value={pdbIdInput} maxLength={4}
                    style={{textTransform:'uppercase', letterSpacing:2, fontFamily:'var(--font-mono)'}}
                    onChange={e => { setPdbIdInput(e.target.value.toUpperCase()); setPdbError(''); }}
@@ -1739,7 +1736,7 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
 
     // Create a plain div with hardcoded pixel dimensions for 3Dmol
     const divEl = document.createElement('div');
-    divEl.style.width    = '600px';
+    divEl.style.width    = '100%';
     divEl.style.height   = '280px';
     divEl.style.position = 'relative';
     container.appendChild(divEl);
@@ -1756,20 +1753,22 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
         viewer.addModel(text, fmt);
 
         if (targetType === 'protein') {
+          viewer.setStyle({}, { cartoon: { color: '#CAD4E2', opacity: 0.8 } }); // light gray
           viewer.setStyle({chain}, { cartoon: { color: '#2A3F5A' } });
           if (hasScores) {
             const bands = [
-              { min: 0.3, max: 0.5, color: '#7E95B8' },
+              { min: 0.3, max: 0.5, color: '#3B4757' },
               { min: 0.5, max: 0.7, color: '#F5A623' },
               { min: 0.7, max: 0.85, color: '#4ECDC4' },
-              { min: 0.85, max: 2.0, color: '#00C2B2' },
+              { min: 0.85, max: 2.0, color: '#5CF08A' },
             ];
             bands.forEach(({ min, max, color }) => {
               const resis = Object.entries(scores)
-                .filter(([k, v]) => k.startsWith(chain) && v >= min && v < max)
-                .map(([k]) => parseInt(k.slice(chain.length)));
+                .filter(([k, v]) => v >= min && v < max)
+                .map(([k]) => parseInt(String(k).match(/\d+/)?.[0]))
+                .filter(n => !isNaN(n));
               if (resis.length > 0)
-                viewer.setStyle({ chain, resi: resis }, { cartoon: { color }, stick: { radius: 0.1, color } });
+                viewer.setStyle({ chain, resi: resis }, { cartoon: { color } });
             });
           }
 
@@ -1777,8 +1776,8 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
           // halo surface — leaves the underlying score-band color untouched.
           if (selected && selected.length > 0) {
             const selResis = selected
-              .filter(r => r.startsWith(chain))
-              .map(r => parseInt(r.slice(chain.length)));
+              .map(r => parseInt(String(r).match(/\d+/)?.[0]))
+              .filter(n => !isNaN(n));
             if (selResis.length > 0) {
               try {
                 viewer.addSurface(window.$3Dmol.SurfaceType.VDW, {
@@ -1788,6 +1787,13 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
               } catch (e) {
                 console.error('[HotspotViewer] addSurface failed:', e);
               }
+              viewer.setStyle(
+                { chain, resi: selResis },
+                {
+                  stick:   { radius: 0.22, color: '#C77DFF' },
+                  sphere:  { radius: 0.4,  color: '#C77DFF' },
+                }
+              );
             }
           }
 
@@ -1862,13 +1868,8 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
         }
 
         viewer.zoomTo();
+        viewer.resize();   // sync WebGL canvas to real container size — fixes hover picking
         viewer.render();
-        // Scale canvas to fill container
-        const canvas = divEl.querySelector('canvas');
-        if (canvas) {
-          canvas.style.width  = '100%';
-          canvas.style.height = '100%';
-        }
         setStatus('ready');
       })
       .catch(e => {
@@ -1886,7 +1887,7 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
     <div className="hotspot-viewer">
       <div className="hotspot-viewer-header">
         <h4>{targetType === 'protein' ? 'Structure — colored by binding probability' : 'Ligand structure'}</h4>
-        <span style={{fontSize:10, color:'var(--grey-3)'}}>Drag to rotate · Scroll to zoom</span>
+        <span style={{fontSize:10, color:'var(--grey-3)'}}>Drag to rotate · Scroll to zoom · Hover a residue for ID</span>
       </div>
       <div ref={containerRef}
            style={{width:'100%', height:'280px', position:'relative', overflow:'hidden',
@@ -1910,12 +1911,13 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
         <div className="viewer-legend">
           {scores && Object.keys(scores).length > 0 ? (
             <>
-              <span><span className="legend-swatch" style={{background:'#7E95B8'}} />Low (0.3+)</span>
+              <span><span className="legend-swatch" style={{background:'#3B4757'}} />Low (0.3+)</span>
               <span><span className="legend-swatch" style={{background:'#F5A623'}} />Medium (0.5+)</span>
               <span><span className="legend-swatch" style={{background:'#4ECDC4'}} />High (0.7+)</span>
-              <span><span className="legend-swatch" style={{background:'#00C2B2'}} />Very high (0.85+)</span>
+              <span><span className="legend-swatch" style={{background:'#5CF08A'}} />Very high (0.85+)</span>
+              <span><span className="legend-swatch" style={{background:'#A4AEBD'}} />Other chains</span>
               {selected && selected.length > 0 && (
-                <span><span className="legend-swatch" style={{background:'#FFD447'}} />Selected</span>
+                <span><span className="legend-swatch" style={{background:'#C77DFF'}} />Selected</span>
               )}
             </>
           ) : (
@@ -1930,6 +1932,21 @@ function HotspotViewer({ file, chain, targetType, scores, selected }) {
 // ============================================================
 // STEP 2: Difficulty score + hotspot review
 // ============================================================
+
+// Compact hotspot patch from PeSTo scores + CA coords: seed at the top-scoring residue,
+// add next-best residues within `radius` A (one hot region).
+function compactPatch(scores, coords, radius = 12, n = 5) {
+  const ids = Object.keys(scores || {}).filter(id => coords && coords[id]);
+  if (!ids.length) return [];
+  ids.sort((a, b) => scores[b] - scores[a]);
+  const [sx, sy, sz] = coords[ids[0]];
+  const near = ids.filter(id => {
+    const [x, y, z] = coords[id];
+    return Math.hypot(x - sx, y - sy, z - sz) <= radius;
+  });
+  return near.slice(0, n);
+}
+
 function DifficultyPage({ data, onBack, onSubmit }) {
   const { targetType, file } = data;
   const [hotspots,   setHotspots]   = useState(data.hotspots || []);
@@ -1943,36 +1960,56 @@ function DifficultyPage({ data, onBack, onSubmit }) {
     setLoadingH(true);
     API.findHotspots(file, targetType, data.chain).then(r => {
       setAutoHots(r);
-      if (r.details?.clusters?.length) setHotspots(r.details.clusters[0].residues);  // top-ranked spatial cluster
-      else if (r.hotspots?.length) setHotspots(r.hotspots.slice(0, 4));
-
-      // For proteins, re-score difficulty using hotspot binding site topology
-      // The initial score didn't have hotspot info — update it if PESTO succeeded
-      if (targetType === 'protein' && r.method === 'pesto' && r.details?.scores) {
-        const scores = Object.values(r.details.scores);
-        const maxScore = Math.max(...scores);
-        const highCount = scores.filter(s => s >= 0.7).length;
-        // Good binding site: high max score and multiple high-scoring residues
-        if (maxScore >= 0.8 && highCount >= 3) {
-          setDifficulty(d => ({
-            ...d,
-            factors: {
-              ...d.factors,
-              binding_site_topology: {
-                score: Math.max(10, (d.factors?.binding_site_topology?.score || 40) - 20),
-                value: null,
-                unit: null,
-                note: `PESTO: ${highCount} high-confidence hotspots (max score ${maxScore.toFixed(2)})`,
-              }
-            },
-            overall: Math.min(95, (d.overall || 50) + 15),
-            warnings: (d.warnings || []).filter(w => !w.includes('hotspot')),
-          }));
-        }
+      // Default to a compact patch from scores + coords; fall back to the top DBSCAN cluster.
+      if (r.details?.coords && r.details?.scores) {
+        const patch = compactPatch(r.details.scores, r.details.coords);
+        if (patch.length) setHotspots(patch);
+        else if (r.details?.clusters?.length) setHotspots(r.details.clusters[0].residues);
+      } 
+      else if (r.details?.clusters?.length) {
+        setHotspots(r.details.clusters[0].residues);
+      }
+      else if (r.hotspots?.length) {
+        setHotspots(r.hotspots.slice(0, 4));      // RDKit fallback
       }
       setLoadingH(false);
     }).catch(() => setLoadingH(false));
   }, []);
+
+  // Recompute epitope chemistry + hotspot patch live as the selection changes.
+  useEffect(() => {
+    if (!autoHots || autoHots.method !== 'pesto') return;
+    const coords = autoHots.details?.coords || {};
+    const sasa   = autoHots.details?.sasa   || {};
+    const sel    = hotspots;
+    setDifficulty(d => {
+          const factors = { ...d.factors };
+          // Epitope chemistry: apolar (hydrophobic) fraction of the patch's SASA (freesasa)
+          let ap = 0, totSasa = 0;
+          sel.forEach(h => { const a = sasa[h]; if (a) { ap += a.apolar; totSasa += a.total; } });
+          if (totSasa > 0) {
+            const frac = ap / totSasa;
+            const s = frac >= 0.60 ? 15 : frac >= 0.45 ? 30 : frac >= 0.30 ? 45 : 70;
+            factors.epitope_chemistry = { score: s, value: Math.round(100*frac),
+              unit: '% hydrophobic surface', note: `${Math.round(100*frac)}% hydrophobic surface` };
+          }
+          // Hotspot patch — max Cα–Cα spread of the selection
+          const pts = sel.map(h => coords[h]).filter(Boolean);
+          if (pts.length >= 2) {
+            let mx = 0;
+            for (let i=0;i<pts.length;i++) for (let j=i+1;j<pts.length;j++)
+              mx = Math.max(mx, Math.hypot(pts[i][0]-pts[j][0], pts[i][1]-pts[j][1], pts[i][2]-pts[j][2]));
+            const s = mx <= 20 ? 15 : mx <= 30 ? 40 : 70;
+            factors.hotspot_patch = { score: s, value: +mx.toFixed(1),
+              unit: 'Å spread', note: `Hotspots span ${mx.toFixed(1)} Å` };
+          }
+          const W = { epitope_chemistry:0.30, hotspot_patch:0.25, flexibility:0.20, globularity:0.15, target_size:0.10 };
+          const present = Object.keys(W).filter(k => factors[k]);
+          const wtot = present.reduce((a,k)=>a+W[k],0) || 1;
+          const overall = present.reduce((a,k)=>a + factors[k].score*(W[k]/wtot), 0);
+          return { ...d, factors, overall: Math.round((100-overall)*10)/10 };
+        });
+      }, [hotspots, autoHots]);
 
   const score    = difficulty.overall || 0;
   const grade    = score > 75 ? 'Easy' : score > 50 ? 'Medium' : score > 30 ? 'Hard' : 'Very Hard';
@@ -2054,34 +2091,52 @@ function DifficultyPage({ data, onBack, onSubmit }) {
           </h3>
           <p className="rec-designs" style={{color:'var(--grey-2)', fontSize:12}}>
             {data.targetType === 'protein'
-              ? 'BindCraft will generate 100 accepted designs by default — adjustable in Advanced settings'
+              ? 'BindCraft will generate 96 accepted designs by default — adjustable in Advanced settings'
               : 'n_designs will be determined automatically after a 100-design pilot run'}
           </p>
         </div>
       </div>
 
       {/* Factors */}
-      {difficulty.factors && Object.keys(difficulty.factors).length > 0 && (
+      {difficulty.factors && Object.keys(difficulty.factors).length > 0 && (() => {
+        const LABELS = {
+          epitope_chemistry: 'Epitope chemistry',
+          hotspot_patch:     'Hotspot patch',
+          flexibility:       'Flexibility',
+          globularity:       'Globularity',
+          target_size:       'Target size',
+        };
+        return (
         <>
           <div className="section-label">Factors</div>
           <div className="factor-grid">
-            {Object.entries(difficulty.factors).map(([k, v]) => (
-              <div key={k} className="factor-card">
-                <div className="factor-name">{k.replace(/_/g, ' ')}</div>
-                <div className="factor-bar-bg">
-                  <div className="factor-bar-fill"
-                       style={{ width: `${v.score}%`,
-                                background: v.score > 60 ? 'var(--red)' :
-                                            v.score > 35 ? 'var(--amber)' : 'var(--teal)' }} />
+            {Object.entries(difficulty.factors).map(([k, v]) => {
+              const ease = 100 - v.score; // higher = easier -> fuller bar
+              return (
+                <div key={k} className="factor-card">
+                  <div className="factor-name">{LABELS[k] || k.replace(/_/g, ' ')}</div>
+                  <div className="factor-bar-bg">
+                    <div className="factor-bar-fill"
+                        style={{ width: `${ease}%`,
+                                  background: ease > 65 ? 'var(--teal)' :
+                                              ease > 40 ? 'var(--amber)' : 'var(--red)' }} />
+                  </div>
+                  <div className="factor-value">
+                    {v.value !== null ? `${v.value} ${v.unit || ''}` : v.note}
+                  </div>
                 </div>
-                <div className="factor-value">
-                  {v.value !== null ? `${v.value} ${v.unit || ''}` : v.note}
-                </div>
-              </div>
-            ))}
+              );
+            })}
+          </div>
+          <div className="hint" style={{marginTop:10, marginBottom:24, fontSize:12, lineHeight:1.5}}>
+            This is an evaluation based only on the uploaded pdb. Post-translational modifications, 
+            disordered regions, and expression/solubility (which can be omitted in PDB files)
+            also make a target harder. Do not treat the score as a guarantee, and make sure 
+            to look into your specific protein.
           </div>
         </>
-      )}
+        );
+      })()}
 
       {/* Warnings */}
       {difficulty.warnings?.length > 0 && (
@@ -2206,9 +2261,8 @@ function DifficultyPage({ data, onBack, onSubmit }) {
           {autoHots.method === 'pesto' ? (
             <>
               PeSTo scored {autoHots.hotspots.length} interface residues and grouped them into{' '}
-              {autoHots.details?.clusters?.length || 0} spatial clusters — the highest-ranked cluster is
-              pre-selected below. BindCraft works best with a{' '}
-              <strong style={{color:'var(--teal)'}}>focused set of 3–10</strong>; remove lower-scoring ones (×) to tighten it.
+              {autoHots.details?.clusters?.length || 0} spatial clusters — a compact high-scoring patch is pre-selected. BindCraft works best with a{' '}
+              <strong style={{color:'var(--teal)'}}>focused set of 3–5</strong>; remove lower-scoring ones (×) to tighten it.
             </>
           ) : (
             <>
@@ -2216,7 +2270,7 @@ function DifficultyPage({ data, onBack, onSubmit }) {
               pre-selected below. Remove ones you don't want (×) and re-add them anytime from the full list below.
             </>
           )}
-          {hotspots.length > 10 && (
+          {hotspots.length > 6 && (
             <span style={{color:'var(--amber)', display:'block', marginTop:4}}>
               ⚠ {hotspots.length} selected is a lot — too many hotspots can prevent any designs from succeeding.
             </span>
@@ -2224,6 +2278,38 @@ function DifficultyPage({ data, onBack, onSubmit }) {
         </div>
       )}
 
+      {autoHots?.method === 'pesto' && !loadingH && (() => {
+        const coords = autoHots.details?.coords || {};
+        const pts = hotspots.map(h => coords[h]).filter(Boolean);
+        if (pts.length < 2) return null;
+        let spread = 0;
+        for (let i = 0; i < pts.length; i++)
+          for (let j = i + 1; j < pts.length; j++) {
+            const d = Math.hypot(pts[i][0]-pts[j][0], pts[i][1]-pts[j][1], pts[i][2]-pts[j][2]);
+            if (d > spread) spread = d;
+          }
+        const TIGHT = 20, MAX = 30;  // one binding site spans ~30 A
+        const sColor = spread <= TIGHT ? 'var(--teal)' : spread <= MAX ? 'var(--amber)' : 'var(--red)';
+        const sNote  = spread <= TIGHT ? 'tight — focused patch'
+                     : spread <= MAX ? 'workable — about the size of one binding site'
+                     : 'too spread — larger than a single binding site';
+        return (
+          <div style={{marginBottom:8}}>
+            {spread > MAX && (
+              <div style={{padding:'10px 12px', borderRadius:8, background:'rgba(255,92,122,0.10)',
+                           border:'1px solid var(--red)', color:'var(--red)', fontSize:13, lineHeight:1.5}}>
+                ⚠ <strong>Selected residues span {spread.toFixed(0)} Å</strong> — wider than a single binding
+                site (~30 Å). A binder can't reach residues this far apart, which usually yields{' '}
+                <strong>zero successful designs</strong>. Tighten to one patch, or run separate jobs per region.
+              </div>
+            )}
+            <div style={{marginTop:6, fontSize:13}}>
+              Spread of selected: <strong style={{color:sColor}}>{spread.toFixed(1)} Å</strong> · {sNote}
+            </div>
+          </div>
+        );
+      })()}
+      
       {(autoHots?.method === 'pesto' || autoHots?.method === 'rdkit_pharmacophore') && autoHots.hotspots?.length > hotspots.length && !loadingH && (
         <div style={{marginBottom:12}}>
           <button className="advanced-toggle" onClick={() => setShowAll(v => !v)}>
@@ -2374,7 +2460,7 @@ function PilotPanel({ jobId, pilot, onConfirm }) {
         <div className="confirm-row">
           <label>n_designs</label>
           <input className="input" type="number" value={nDesigns}
-                 onChange={e => setNDesigns(+e.target.value)} step={100} min={100} />
+                 onChange={e => setNDesigns(+e.target.value)} step={12} min={12} />
           <span className="pilot-rec">
             Recommended: {pilot.recommended_n_designs?.toLocaleString()}
             {pilot.pass_rate > 0
