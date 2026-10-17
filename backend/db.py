@@ -280,3 +280,105 @@ def get_results(job_id: str, limit: int = 50) -> list:
             d["metrics"] = json.loads(d["metrics"]) if d["metrics"] else {}
             results.append(d)
         return results
+
+# ---------------------------------------------------------------------------
+# Resubmit counters (survive server restarts)
+# ---------------------------------------------------------------------------
+
+def _ensure_resubmits_table(conn):
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS resubmits (
+               job_id     TEXT NOT NULL,
+               stage_name TEXT NOT NULL,
+               count      INTEGER NOT NULL DEFAULT 0,
+               PRIMARY KEY (job_id, stage_name)
+           )"""
+    )
+
+
+def get_resubmit_count(job_id: str, stage_name: str) -> int:
+    with get_db() as conn:
+        _ensure_resubmits_table(conn)
+        row = conn.execute(
+            "SELECT count FROM resubmits WHERE job_id=? AND stage_name=?",
+            (job_id, stage_name)
+        ).fetchone()
+        return row["count"] if row else 0
+
+
+def increment_resubmit_count(job_id: str, stage_name: str) -> int:
+    with get_db() as conn:
+        _ensure_resubmits_table(conn)
+        conn.execute(
+            """INSERT INTO resubmits (job_id, stage_name, count)
+               VALUES (?, ?, 1)
+               ON CONFLICT(job_id, stage_name) DO UPDATE SET count = count + 1""",
+            (job_id, stage_name)
+        )
+        row = conn.execute(
+            "SELECT count FROM resubmits WHERE job_id=? AND stage_name=?",
+            (job_id, stage_name)
+        ).fetchone()
+        return row["count"]
+
+def update_job_config_key(job_id: str, key: str, value):
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT config FROM jobs WHERE id=?", (job_id,)
+        ).fetchone()
+        if not row:
+            return
+        config = json.loads(row["config"] or "{}")
+        config[key] = value
+        conn.execute(
+            "UPDATE jobs SET config=?, updated_at=? WHERE id=?",
+            (json.dumps(config), time.time(), job_id)
+        )
+
+# ---------------------------------------------------------------------------
+# Cross-process coordination for auto-resubmit
+# ---------------------------------------------------------------------------
+
+def claim_resubmit(job_id: str, stage_name: str, expected_sid) -> bool:
+    """
+    Atomically take ownership of resubmitting a stage. Succeeds only if the
+    stage still points at the job that timed out; the first caller wins.
+    """
+    with get_db() as conn:
+        cur = conn.execute(
+            """UPDATE stages SET scheduler_id='resubmitting'
+               WHERE job_id=? AND stage_name=? AND scheduler_id=?""",
+            (job_id, stage_name, str(expected_sid))
+        )
+        return cur.rowcount == 1
+
+
+def _ensure_watchdog_table(conn):
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS watchdogs (
+               job_id     TEXT NOT NULL,
+               stage_name TEXT NOT NULL,
+               watched_id TEXT NOT NULL,
+               PRIMARY KEY (job_id, stage_name, watched_id)
+           )"""
+    )
+
+
+def claim_watchdog(job_id: str, stage_name: str, watched_id) -> bool:
+    """True if no watchdog was registered for this job yet (caller submits it)."""
+    with get_db() as conn:
+        _ensure_watchdog_table(conn)
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO watchdogs (job_id, stage_name, watched_id) VALUES (?, ?, ?)",
+            (job_id, stage_name, str(watched_id))
+        )
+        return cur.rowcount == 1
+
+
+def release_watchdog(job_id: str, stage_name: str, watched_id):
+    with get_db() as conn:
+        _ensure_watchdog_table(conn)
+        conn.execute(
+            "DELETE FROM watchdogs WHERE job_id=? AND stage_name=? AND watched_id=?",
+            (job_id, stage_name, str(watched_id))
+        )

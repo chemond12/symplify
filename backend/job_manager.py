@@ -34,6 +34,7 @@ class JobSpec:
     mem_gb:      int   = 32
     hours:       int   = 12
     depends_on:  list  = field(default_factory=list)  # list of job IDs
+    dependency_type: str = "afterok"   # SLURM only: afterok | afterany
     env_vars:    dict  = field(default_factory=dict)
     conda_env:   str   = ""
     module_load: str   = ""               # e.g. "anaconda3/2025.12"
@@ -112,7 +113,7 @@ class SLURMScheduler(BaseScheduler):
             header.append(f"#SBATCH --account={self.account}")
         if spec.depends_on:
             dep = ":".join(str(j) for j in spec.depends_on)
-            header.append(f"#SBATCH --dependency=afterok:{dep}")
+            header.append(f"#SBATCH --dependency={spec.dependency_type}:{dep}")
         if self.extra_flags:
             header.append(f"#SBATCH {self.extra_flags}")
         if spec.extra_flags:
@@ -166,7 +167,7 @@ class SLURMScheduler(BaseScheduler):
             state_map = {
                 "PENDING": "PENDING", "RUNNING": "RUNNING",
                 "COMPLETED": "COMPLETED", "FAILED": "FAILED",
-                "CANCELLED": "FAILED", "TIMEOUT": "FAILED",
+                "CANCELLED": "FAILED", "TIMEOUT": "TIMEOUT",
                 "NODE_FAIL": "FAILED",
             }
             mapped = state_map.get(state, "UNKNOWN")

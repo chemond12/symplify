@@ -567,6 +567,9 @@ def main():
         shutil.copy2(pdb, dest)
         row["pdb_path"] = str(dest)
 
+        if args.linker_repeats <= 0:
+            continue
+
         linker_out = linker_dir / pdb.name
         try:
             append_gs_linker(
