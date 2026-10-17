@@ -1299,10 +1299,11 @@ function recommendMaxResubmits(grade, targetType) {
 }
 
 const API = {
-  async scoreTarget(file, targetType) {
+  async scoreTarget(file, targetType, chain) {
     const fd = new FormData();
     fd.append('file', file);
     fd.append('target_type', targetType);
+    if (chain) fd.append('chain', chain);
     const r = await fetch('/api/score-difficulty', { method: 'POST', body: fd });
     return r.json();
   },
@@ -1461,11 +1462,11 @@ function UploadPage({ onNext }) {
         const r = await fetch('/api/score-difficulty-by-path', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ file_path: file._path, target_type: targetType }),
+          body: JSON.stringify({ file_path: file._path, target_type: targetType, chain }),
         });
         diff = await r.json();
       } else {
-        diff = await API.scoreTarget(file, targetType);
+        diff = await API.scoreTarget(file, targetType, chain);
       }
       onNext({ file, jobName, targetType, chain, hotspots,
         difficulty: diff });

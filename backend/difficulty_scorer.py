@@ -31,7 +31,8 @@ class DifficultyReport:
 # Protein difficulty scoring
 # ---------------------------------------------------------------------------
 
-def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None) -> DifficultyReport:
+def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None,
+                  chain: Optional[str] = None) -> DifficultyReport:
     """
     Score binding difficulty for a protein target.
 
@@ -40,6 +41,9 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None) -> Dif
     - Hydrophobic patch area at interface
     - Target flexibility (high B-factors = harder)
     - Interface size (tiny interfaces = harder)
+
+    chain : if given, only that chain is scored (size, flexibility, globularity,
+            SASA). Otherwise every chain in the file is treated as the target.
     """
     from Bio.PDB import PDBParser
     import numpy as np
@@ -49,11 +53,16 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None) -> Dif
     model = structure[0]
 
     # Collect all residues and Cα coordinates
+    chains = list(model)
+    if chain:
+        sel = [c for c in chains if c.id == chain]
+        chains = sel or chains          # unknown chain id -> fall back to all
     residues = []
-    for chain in model:
-        for res in chain:
+    for ch in chains:
+        for res in ch:
             if res.id[0] == " " and "CA" in res:
                 residues.append(res)
+    scored_chain = chain if chain and any(c.id == chain for c in model) else None
 
     if not residues:
         return _default_medium_report("protein")
@@ -124,8 +133,7 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None) -> Dif
     # residues expose mostly polar surface, so the fraction respects the O-ring.
     if hotspot_residues:
         try:
-            import freesasa
-            areas = freesasa.calc(freesasa.Structure(pdb_path)).residueAreas()
+            areas = _chain_residue_areas(pdb_path, scored_chain)
         except Exception:
             areas = None
         if areas:
@@ -141,9 +149,9 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None) -> Dif
                 if frac < 0.30:
                     warnings.append("Epitope exposes mostly polar surface — few hydrophobic anchors, which lowers binder hit rates")
                 factors["epitope_chemistry"] = {
-                "score": chem_score, "value": round(100 * frac),
-                "unit": "% hydrophobic surface", "note": f"{round(100 * frac)}% hydrophobic surface",
-            }
+                    "score": chem_score, "value": round(100 * frac),
+                    "unit": "% hydrophobic surface", "note": f"{round(100 * frac)}% hydrophobic surface",
+                }
 
     # Factor 5: Hotspot patch — how tight the selected hotspots are (max CA–CA
     # spread). A single binding site spans ~30 Å; tighter is easier.
@@ -391,6 +399,34 @@ def _load_molecule(path: str):
             return None
     except Exception:
         return None
+
+
+def _chain_residue_areas(pdb_path: str, chain: Optional[str]):
+    """
+    Per-residue SASA computed on the target chain ALONE. Partner chains in the
+    file (e.g. a ligand-bound complex) would otherwise bury part of the
+    epitope and make it look less exposed than it is for a free target.
+    """
+    import freesasa
+    if not chain:
+        return freesasa.calc(freesasa.Structure(pdb_path)).residueAreas()
+    import os, tempfile
+    from Bio.PDB import PDBParser, PDBIO, Select
+
+    class _OnlyChain(Select):
+        def accept_chain(self, c):
+            return c.id == chain
+        def accept_residue(self, r):
+            return r.id[0] == " "          # protein residues only, no waters/ligands
+
+    struct = PDBParser(QUIET=True).get_structure("t", pdb_path)
+    io = PDBIO(); io.set_structure(struct)
+    fd, tmp = tempfile.mkstemp(suffix=".pdb"); os.close(fd)
+    try:
+        io.save(tmp, _OnlyChain())
+        return freesasa.calc(freesasa.Structure(tmp)).residueAreas()
+    finally:
+        os.unlink(tmp)
 
 
 def _build_report(overall: float, factors: dict,

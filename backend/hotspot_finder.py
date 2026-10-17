@@ -30,9 +30,9 @@ def _compute_sasa(pdb_path, target_chain):
     """Per-residue apolar (hydrophobic) + total SASA via freesasa, keyed by
     res_id_str (chain+resnum). Returns {} if freesasa is unavailable."""
     try:
-        import freesasa
-        result = freesasa.calc(freesasa.Structure(pdb_path))
-        areas = result.residueAreas()
+        # SASA of the target chain alone, so partner chains don't mask the epitope
+        from difficulty_scorer import _chain_residue_areas
+        areas = _chain_residue_areas(pdb_path, target_chain)
     except Exception:
         return {}
     out = {}
