@@ -184,6 +184,9 @@ def _poll_job_stages(job_id):
 
             if live.state == "RUNNING" and stage["status"] != "running":
                 db.update_stage(job_id, name, "running")
+            elif live.state == "PENDING" and stage["status"] == "running":
+                # submitted to SLURM but still waiting for a node — not started yet
+                db.update_stage(job_id, name, "queued")
             elif live.state == "COMPLETED":
                 print(f"[poll] {job_id[:8]} {name}: completed", flush=True)
                 db.update_stage(job_id, name, "completed")
@@ -237,6 +240,11 @@ def get_job(job_id):
                             "exhausted_stages": exhausted}
 
     job["stages"] = stages
+    # Job-level badge: "queued" while nothing has actually started running
+    if job.get("status") == "running":
+        sts = [s["status"] for s in stages]
+        if "queued" in sts and "running" not in sts and "completed" not in sts:
+            job["status"] = "queued"
     if job.get("difficulty_report") and isinstance(job["difficulty_report"], str):
         try:
             job["difficulty_report"] = json.loads(job["difficulty_report"])

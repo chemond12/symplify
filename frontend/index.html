@@ -585,6 +585,7 @@
   }
 
   .stage-dot.pending  { border-color: var(--grey-3); color: var(--grey-3); }
+  .stage-dot.queued   { border-color: var(--amber); color: var(--amber); border-style: dashed; }
   .stage-dot.running  { border-color: var(--teal); color: var(--teal);
                         box-shadow: 0 0 16px var(--teal); animation: pulse 2s infinite; }
   .stage-dot.completed { border-color: var(--teal); background: var(--teal); color: var(--navy); }
@@ -845,6 +846,7 @@
   .status-badge.completed { background: rgba(61,214,140,0.15); color: var(--green); }
   .status-badge.failed    { background: rgba(255,92,122,0.15); color: var(--red); }
   .status-badge.pending   { background: rgba(126,149,184,0.15); color: var(--grey-2); }
+  .status-badge.queued    { background: rgba(255,184,0,0.12); color: var(--amber); }
 
   .log-box {
     background: var(--navy);
@@ -1366,6 +1368,7 @@ function Spinner() { return <span className="spinner" />; }
 function StatusBadge({ status }) {
   const labels = { running: '● Running', completed: '✓ Complete',
                    failed: '✗ Failed', pending: '○ Pending',
+                   queued: '◌ In queue',
                    cancelled: '✗ Cancelled' };
   return <span className={`status-badge ${status}`}>{labels[status] || status}</span>;
 }
@@ -2601,7 +2604,9 @@ function StatusPage({ jobId, onResults, onNewJob }) {
       </div>
       <h1 className="page-title">{job.name}</h1>
       <p className="page-sub" style={{marginBottom:32}}>
-        Job submitted to cluster — polling for updates every 8 seconds.
+        {job.status === 'queued'
+          ? 'Submitted — waiting in the cluster queue for a free GPU. Nothing has started yet.'
+          : 'Job submitted to cluster — polling for updates every 8 seconds.'}
       </p>
 
       {/* Pipeline visualization */}
@@ -2614,6 +2619,7 @@ function StatusPage({ jobId, onResults, onNewJob }) {
                 <div className={`stage-dot ${s.status}`}>
                   {s.status === 'completed' ? '✓' :
                    s.status === 'running'   ? '●' :
+                   s.status === 'queued'    ? '◌' :
                    s.status === 'failed'    ? '✗' : (i + 1)}
                 </div>
                 <div className={`stage-label ${s.status === 'running' ? 'active' : ''}`}>
