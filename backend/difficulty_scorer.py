@@ -7,7 +7,8 @@ Returns a 0-100 difficulty score with per-factor breakdown.
 For proteins:  analyzes the binding site / hotspot region
 For small molecules: analyzes molecular properties
 
-Lower score = easier to design binders for.
+Internally each factor is scored low = easier. The reported `overall` is
+inverted (100 - weighted difficulty) so that HIGH = EASY, matching the UI gauge.
 """
 
 import json
@@ -18,7 +19,7 @@ from typing import Optional
 
 @dataclass
 class DifficultyReport:
-    overall:            float           # 0-100, lower = easier
+    overall:            float           # 0-100, HIGHER = EASIER (100 - raw difficulty)
     grade:              str             # "Easy", "Medium", "Hard", "Very Hard"
     factors:            dict            # per-factor scores and explanations
     recommended_designs: int            # suggested n_designs based on difficulty
@@ -390,17 +391,17 @@ def _load_molecule(path: str):
 
 def _build_report(overall: float, factors: dict,
                    warnings: list, target_type: str) -> DifficultyReport:
-    overall = round(overall, 1)
-    if overall < 25:
+    """`overall` arrives as raw difficulty (low = easy). It is reported inverted
+    (high = easy) so the gauge and grade thresholds in the UI line up:
+    UI grade: >75 Easy, >50 Medium, >30 Hard, else Very Hard."""
+    raw_difficulty = round(overall, 1)
+    if raw_difficulty < 25:
         grade = "Easy"
         n_designs = 2000
-    elif overall < 45:
-        grade = "Doable"
-        n_designs = 3000
-    elif overall < 60:
+    elif raw_difficulty < 50:
         grade = "Medium"
         n_designs = 5000
-    elif overall < 70:
+    elif raw_difficulty < 70:
         grade = "Hard"
         n_designs = 10000
     else:
@@ -408,7 +409,7 @@ def _build_report(overall: float, factors: dict,
         n_designs = 20000
 
     return DifficultyReport(
-        overall            = overall,
+        overall            = round(100 - raw_difficulty, 1),
         grade              = grade,
         factors            = factors,
         recommended_designs = n_designs,
