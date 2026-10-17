@@ -1930,13 +1930,17 @@ function DifficultyPage({ data, onBack, onSubmit }) {
     const sasa   = autoHots.details?.sasa   || {};
     const sel    = hotspots;
     setDifficulty(d => {
+          const cfg = d.config;            // weights/bands come from the backend scorer
+          if (!cfg) return d;
           const factors = { ...d.factors };
           // Epitope chemistry: apolar (hydrophobic) fraction of the patch's SASA (freesasa)
           let ap = 0, totSasa = 0;
           sel.forEach(h => { const a = sasa[h]; if (a) { ap += a.apolar; totSasa += a.total; } });
           if (totSasa > 0) {
             const frac = ap / totSasa;
-            const s = frac >= 0.60 ? 15 : frac >= 0.45 ? 30 : frac >= 0.30 ? 45 : 70;
+            const eb = cfg.epitope_bands;
+            const hit = eb.min_fraction.find(([t]) => frac >= t);
+            const s = hit ? hit[1] : eb.fallback;
             factors.epitope_chemistry = { score: s, value: Math.round(100*frac),
               unit: '% hydrophobic surface', note: `${Math.round(100*frac)}% hydrophobic surface` };
           }
@@ -1946,11 +1950,13 @@ function DifficultyPage({ data, onBack, onSubmit }) {
             let mx = 0;
             for (let i=0;i<pts.length;i++) for (let j=i+1;j<pts.length;j++)
               mx = Math.max(mx, Math.hypot(pts[i][0]-pts[j][0], pts[i][1]-pts[j][1], pts[i][2]-pts[j][2]));
-            const s = mx <= 20 ? 15 : mx <= 30 ? 40 : 70;
+            const pb = cfg.patch_bands;
+            const hit = pb.max_spread_A.find(([t]) => mx <= t);
+            const s = hit ? hit[1] : pb.fallback;
             factors.hotspot_patch = { score: s, value: +mx.toFixed(1),
               unit: 'Å spread', note: `Hotspots span ${mx.toFixed(1)} Å` };
           }
-          const W = { epitope_chemistry:0.30, hotspot_patch:0.25, flexibility:0.20, globularity:0.15, target_size:0.10 };
+          const W = cfg.weights;
           const present = Object.keys(W).filter(k => factors[k]);
           const wtot = present.reduce((a,k)=>a+W[k],0) || 1;
           const overall = present.reduce((a,k)=>a + factors[k].score*(W[k]/wtot), 0);

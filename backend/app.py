@@ -680,6 +680,7 @@ def score_difficulty():
             "factors":             report.factors,
             "recommended_designs": report.recommended_designs,
             "warnings":            report.warnings,
+            "config":              report.config,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -767,6 +768,7 @@ def score_difficulty_by_path():
             "factors":             report.factors,
             "recommended_designs": report.recommended_designs,
             "warnings":            report.warnings,
+            "config":              report.config,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500

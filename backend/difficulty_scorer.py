@@ -12,7 +12,7 @@ inverted (100 - weighted difficulty) so that HIGH = EASY, matching the UI gauge.
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -25,6 +25,40 @@ class DifficultyReport:
     recommended_designs: int            # suggested n_designs based on difficulty
     warnings:           list[str]       # specific concerns
     target_type:        str             # "protein" or "small_molecule"
+    config:             dict = field(default_factory=dict)   # scoring constants the UI reuses
+
+
+# ---------------------------------------------------------------------------
+# Scoring constants — SINGLE SOURCE OF TRUTH. The frontend's live recompute
+# reads these from the API (`config`), so edit them here only.
+# ---------------------------------------------------------------------------
+
+PROTEIN_WEIGHTS = {"epitope_chemistry": 0.30, "hotspot_patch": 0.25,
+                   "flexibility": 0.20, "globularity": 0.15, "target_size": 0.10}
+
+# (threshold, score) pairs checked in order; anything below the last threshold
+# gets the fallback score. Epitope: hydrophobic fraction >= t. Patch: spread <= t.
+EPITOPE_BANDS = {"min_fraction": [[0.60, 15], [0.45, 30], [0.30, 45]], "fallback": 70}
+PATCH_BANDS   = {"max_spread_A": [[20, 15], [30, 40]],                 "fallback": 70}
+
+
+def _band_ge(value, bands):
+    for t, s in bands["min_fraction"]:
+        if value >= t:
+            return s
+    return bands["fallback"]
+
+
+def _band_le(value, bands):
+    for t, s in bands["max_spread_A"]:
+        if value <= t:
+            return s
+    return bands["fallback"]
+
+
+def scoring_config() -> dict:
+    return {"weights": PROTEIN_WEIGHTS, "epitope_bands": EPITOPE_BANDS,
+            "patch_bands": PATCH_BANDS}
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +179,7 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None,
                         ap += a.apolar; tot += a.total
             if tot > 0:
                 frac = ap / tot
-                chem_score = 15 if frac >= 0.60 else 30 if frac >= 0.45 else 45 if frac >= 0.30 else 70
+                chem_score = _band_ge(frac, EPITOPE_BANDS)
                 if frac < 0.30:
                     warnings.append("Epitope exposes mostly polar surface — few hydrophobic anchors, which lowers binder hit rates")
                 factors["epitope_chemistry"] = {
@@ -163,7 +197,7 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None,
             for i in range(len(arr)):
                 for j in range(i + 1, len(arr)):
                     spread = max(spread, float(np.linalg.norm(arr[i] - arr[j])))
-            patch_score = 15 if spread <= 20 else 40 if spread <= 30 else 70
+            patch_score = _band_le(spread, PATCH_BANDS)
             if spread > 30:
                 warnings.append("Hotspots span more than one binding site — a single binder can't reach them all")
             factors["hotspot_patch"] = {
@@ -178,8 +212,7 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None,
                                     "note": "Pending hotspot selection"}
 
     # Compute overall — weight by importance, renormalized over available factors
-    base_weights = {"epitope_chemistry": 0.30, "hotspot_patch": 0.25,
-                    "flexibility": 0.20, "globularity": 0.15, "target_size": 0.10}
+    base_weights = PROTEIN_WEIGHTS
     present = {k: w for k, w in base_weights.items() if k in factors}
     tot = sum(present.values()) or 1.0
     overall = sum(factors[k]["score"] * (present[k] / tot) for k in present)
@@ -455,6 +488,7 @@ def _build_report(overall: float, factors: dict,
         recommended_designs = n_designs,
         warnings           = warnings,
         target_type        = target_type,
+        config             = scoring_config(),
     )
 
 
@@ -467,4 +501,5 @@ def _default_medium_report(target_type: str,
         recommended_designs = 5000,
         warnings           = [warning] if warning else [],
         target_type        = target_type,
+        config             = scoring_config(),
     )
