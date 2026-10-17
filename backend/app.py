@@ -184,6 +184,9 @@ def _poll_job_stages(job_id):
 
             if live.state == "RUNNING" and stage["status"] != "running":
                 db.update_stage(job_id, name, "running")
+            elif live.state == "PENDING" and stage["status"] == "running":
+                # submitted to SLURM but still waiting for a node — not started yet
+                db.update_stage(job_id, name, "queued")
             elif live.state == "COMPLETED":
                 print(f"[poll] {job_id[:8]} {name}: completed", flush=True)
                 db.update_stage(job_id, name, "completed")
@@ -237,6 +240,11 @@ def get_job(job_id):
                             "exhausted_stages": exhausted}
 
     job["stages"] = stages
+    # Job-level badge: "queued" while nothing has actually started running
+    if job.get("status") == "running":
+        sts = [s["status"] for s in stages]
+        if "queued" in sts and "running" not in sts and "completed" not in sts:
+            job["status"] = "queued"
     if job.get("difficulty_report") and isinstance(job["difficulty_report"], str):
         try:
             job["difficulty_report"] = json.loads(job["difficulty_report"])
@@ -653,6 +661,7 @@ def score_difficulty():
 
     f           = request.files["file"]
     target_type = request.form.get("target_type", "protein")
+    chain       = (request.form.get("chain") or "").strip() or None
 
     filename    = secure_filename(f.filename)
     tmp_path    = UPLOAD_DIR / f"tmp_{filename}"
@@ -661,7 +670,7 @@ def score_difficulty():
 
     try:
         if target_type == "protein":
-            report = score_protein(str(tmp_path))
+            report = score_protein(str(tmp_path), chain=chain)
         else:
             report = score_small_molecule(str(tmp_path))
 
@@ -671,6 +680,7 @@ def score_difficulty():
             "factors":             report.factors,
             "recommended_designs": report.recommended_designs,
             "warnings":            report.warnings,
+            "config":              report.config,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -741,13 +751,14 @@ def score_difficulty_by_path():
     data        = request.get_json() or {}
     file_path   = data.get("file_path")
     target_type = data.get("target_type", "protein")
+    chain       = (data.get("chain") or "").strip() or None
 
     if not file_path or not Path(file_path).exists():
         return jsonify({"error": "File not found"}), 400
 
     try:
         if target_type == "protein":
-            report = score_protein(file_path)
+            report = score_protein(file_path, chain=chain)
         else:
             report = score_small_molecule(file_path)
 
@@ -757,6 +768,7 @@ def score_difficulty_by_path():
             "factors":             report.factors,
             "recommended_designs": report.recommended_designs,
             "warnings":            report.warnings,
+            "config":              report.config,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500

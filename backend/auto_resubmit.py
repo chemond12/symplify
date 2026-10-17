@@ -62,7 +62,7 @@ def ensure_watchdogs(router, job_id):
         name = stage["stage_name"]
         sid  = stage.get("scheduler_id")
         if (name not in RESUMABLE_STAGES or not sid or not str(sid).isdigit()
-                or stage["status"] not in ("running", "pending")):
+                or stage["status"] not in ("running", "queued", "pending")):
             continue
         try:
             if not db.claim_watchdog(job_id, name, sid):

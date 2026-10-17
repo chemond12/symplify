@@ -7,30 +7,66 @@ Returns a 0-100 difficulty score with per-factor breakdown.
 For proteins:  analyzes the binding site / hotspot region
 For small molecules: analyzes molecular properties
 
-Lower score = easier to design binders for.
+Internally each factor is scored low = easier. The reported `overall` is
+inverted (100 - weighted difficulty) so that HIGH = EASY, matching the UI gauge.
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 
 @dataclass
 class DifficultyReport:
-    overall:            float           # 0-100, lower = easier
+    overall:            float           # 0-100, HIGHER = EASIER (100 - raw difficulty)
     grade:              str             # "Easy", "Medium", "Hard", "Very Hard"
     factors:            dict            # per-factor scores and explanations
     recommended_designs: int            # suggested n_designs based on difficulty
     warnings:           list[str]       # specific concerns
     target_type:        str             # "protein" or "small_molecule"
+    config:             dict = field(default_factory=dict)   # scoring constants the UI reuses
+
+
+# ---------------------------------------------------------------------------
+# Scoring constants — SINGLE SOURCE OF TRUTH. The frontend's live recompute
+# reads these from the API (`config`), so edit them here only.
+# ---------------------------------------------------------------------------
+
+PROTEIN_WEIGHTS = {"epitope_chemistry": 0.30, "hotspot_patch": 0.25,
+                   "flexibility": 0.20, "globularity": 0.15, "target_size": 0.10}
+
+# (threshold, score) pairs checked in order; anything below the last threshold
+# gets the fallback score. Epitope: hydrophobic fraction >= t. Patch: spread <= t.
+EPITOPE_BANDS = {"min_fraction": [[0.60, 15], [0.45, 30], [0.30, 45]], "fallback": 70}
+PATCH_BANDS   = {"max_spread_A": [[20, 15], [30, 40]],                 "fallback": 70}
+
+
+def _band_ge(value, bands):
+    for t, s in bands["min_fraction"]:
+        if value >= t:
+            return s
+    return bands["fallback"]
+
+
+def _band_le(value, bands):
+    for t, s in bands["max_spread_A"]:
+        if value <= t:
+            return s
+    return bands["fallback"]
+
+
+def scoring_config() -> dict:
+    return {"weights": PROTEIN_WEIGHTS, "epitope_bands": EPITOPE_BANDS,
+            "patch_bands": PATCH_BANDS}
 
 
 # ---------------------------------------------------------------------------
 # Protein difficulty scoring
 # ---------------------------------------------------------------------------
 
-def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None) -> DifficultyReport:
+def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None,
+                  chain: Optional[str] = None) -> DifficultyReport:
     """
     Score binding difficulty for a protein target.
 
@@ -39,6 +75,9 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None) -> Dif
     - Hydrophobic patch area at interface
     - Target flexibility (high B-factors = harder)
     - Interface size (tiny interfaces = harder)
+
+    chain : if given, only that chain is scored (size, flexibility, globularity,
+            SASA). Otherwise every chain in the file is treated as the target.
     """
     from Bio.PDB import PDBParser
     import numpy as np
@@ -48,11 +87,16 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None) -> Dif
     model = structure[0]
 
     # Collect all residues and Cα coordinates
+    chains = list(model)
+    if chain:
+        sel = [c for c in chains if c.id == chain]
+        chains = sel or chains          # unknown chain id -> fall back to all
     residues = []
-    for chain in model:
-        for res in chain:
+    for ch in chains:
+        for res in ch:
             if res.id[0] == " " and "CA" in res:
                 residues.append(res)
+    scored_chain = chain if chain and any(c.id == chain for c in model) else None
 
     if not residues:
         return _default_medium_report("protein")
@@ -84,20 +128,37 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None) -> Dif
         "unit": "residues", "note": f"{n_residues} residues",
     }
 
-    # Factor 2: Flexibility (mean B-factor)
-    bfactors = [atom.bfactor for res in residues for atom in res]
-    mean_bfactor = float(sum(bfactors) / len(bfactors)) if bfactors else 20.0
-    if mean_bfactor > 50:
-        flex_score = 75
-        warnings.append("High B-factors suggest target flexibility — may reduce prediction confidence")
-    elif mean_bfactor > 30:
-        flex_score = 40
-    else:
-        flex_score = 15
-    factors["flexibility"] = {
-        "score": flex_score, "value": round(mean_bfactor, 1),
-        "unit": "mean B-factor (Å²)", "note": f"Mean B-factor: {mean_bfactor:.1f} Å²",
-    }
+    # Factor 2: Flexibility. Experimental structures: mean B-factor (high = mobile).
+    # Predicted structures (AlphaFold, ColabFold, ESMFold, Boltz...) store pLDDT
+    # in the B-factor column, where HIGH = CONFIDENT, so the logic must flip.
+    mean_b, kind = _confidence_signal(pdb_path, residues)
+    if kind == "plddt":
+        if mean_b >= 90:
+            flex_score = 15
+        elif mean_b >= 70:
+            flex_score = 40
+        else:
+            flex_score = 75
+            warnings.append("Low mean pLDDT — predicted structure is low-confidence, so the fold (and the epitope) may be wrong")
+        factors["flexibility"] = {
+            "score": flex_score, "value": round(mean_b, 1),
+            "unit": "mean pLDDT (predicted model)",
+            "note": f"Predicted structure — mean pLDDT {mean_b:.1f}",
+        }
+    elif kind == "bfactor":
+        if mean_b > 50:
+            flex_score = 75
+            warnings.append("High B-factors suggest target flexibility — may reduce prediction confidence")
+        elif mean_b > 30:
+            flex_score = 40
+        else:
+            flex_score = 15
+        factors["flexibility"] = {
+            "score": flex_score, "value": round(mean_b, 1),
+            "unit": "mean B-factor (Å²)", "note": f"Mean B-factor: {mean_b:.1f} Å²",
+        }
+    # kind == "none": B-factors carry no information (all zero / constant), so the
+    # factor is omitted and the remaining weights renormalize.
 
     # Factor 3: Globularity — compact globular folds are easier; extended or
     # disordered chains are much harder (Science 2024, IDR binders). Rg vs the
@@ -123,8 +184,7 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None) -> Dif
     # residues expose mostly polar surface, so the fraction respects the O-ring.
     if hotspot_residues:
         try:
-            import freesasa
-            areas = freesasa.calc(freesasa.Structure(pdb_path)).residueAreas()
+            areas = _chain_residue_areas(pdb_path, scored_chain)
         except Exception:
             areas = None
         if areas:
@@ -136,13 +196,13 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None) -> Dif
                         ap += a.apolar; tot += a.total
             if tot > 0:
                 frac = ap / tot
-                chem_score = 15 if frac >= 0.60 else 30 if frac >= 0.45 else 45 if frac >= 0.30 else 70
+                chem_score = _band_ge(frac, EPITOPE_BANDS)
                 if frac < 0.30:
                     warnings.append("Epitope exposes mostly polar surface — few hydrophobic anchors, which lowers binder hit rates")
                 factors["epitope_chemistry"] = {
-                "score": chem_score, "value": round(100 * frac),
-                "unit": "% hydrophobic surface", "note": f"{round(100 * frac)}% hydrophobic surface",
-            }
+                    "score": chem_score, "value": round(100 * frac),
+                    "unit": "% hydrophobic surface", "note": f"{round(100 * frac)}% hydrophobic surface",
+                }
 
     # Factor 5: Hotspot patch — how tight the selected hotspots are (max CA–CA
     # spread). A single binding site spans ~30 Å; tighter is easier.
@@ -154,7 +214,7 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None) -> Dif
             for i in range(len(arr)):
                 for j in range(i + 1, len(arr)):
                     spread = max(spread, float(np.linalg.norm(arr[i] - arr[j])))
-            patch_score = 15 if spread <= 20 else 40 if spread <= 30 else 70
+            patch_score = _band_le(spread, PATCH_BANDS)
             if spread > 30:
                 warnings.append("Hotspots span more than one binding site — a single binder can't reach them all")
             factors["hotspot_patch"] = {
@@ -169,8 +229,7 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None) -> Dif
                                     "note": "Pending hotspot selection"}
 
     # Compute overall — weight by importance, renormalized over available factors
-    base_weights = {"epitope_chemistry": 0.30, "hotspot_patch": 0.25,
-                    "flexibility": 0.20, "globularity": 0.15, "target_size": 0.10}
+    base_weights = PROTEIN_WEIGHTS
     present = {k: w for k, w in base_weights.items() if k in factors}
     tot = sum(present.values()) or 1.0
     overall = sum(factors[k]["score"] * (present[k] / tot) for k in present)
@@ -315,6 +374,33 @@ def score_small_molecule(structure_path: str) -> DifficultyReport:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _smiles_from_ccd(content: str):
+    """
+    Pull a SMILES string out of a CCD-style CIF. Descriptor rows look like
+        7V7 SMILES_CANONICAL CACTVS 3.370 "CC(=O)Nc1ccc(O)cc1"
+        HCY SMILES           ACDLabs 10.04 O=C(O)C(N)CCS
+    The value is quoted only when it contains special characters, so both the
+    quoted and the bare form must be handled. Preference order:
+    CACTVS canonical > other canonical > any SMILES row.
+    """
+    import re
+    row = re.compile(r"""^\S+\s+(SMILES\w*)\s+(\S+)\s+\S+\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*$""")
+    found = []
+    for line in content.split('\n'):
+        m = row.match(line.strip())
+        if m:
+            kind, prog = m.group(1), m.group(2)
+            val = m.group(3) or m.group(4) or m.group(5)
+            found.append((kind, prog, val))
+    for want in (lambda k, p: k == "SMILES_CANONICAL" and "CACTVS" in p,
+                 lambda k, p: k == "SMILES_CANONICAL",
+                 lambda k, p: True):
+        for k, p, v in found:
+            if want(k, p) and len(v) >= 2:
+                return v
+    return None
+
+
 def _load_molecule(path: str):
     """Try to load a molecule from PDB, CIF, SDF, or MOL2."""
     try:
@@ -352,30 +438,7 @@ def _load_molecule(path: str):
                 with open(path, errors='ignore') as f:
                     content = f.read()
 
-            # Parse CCD CIF SMILES lines — format is:
-            # COMPID  TYPE  PROGRAM  VERSION  "SMILES_STRING"
-            smiles = None
-            for line in content.split('\n'):
-                line = line.strip()
-                # Look for lines with SMILES_CANONICAL CACTVS first (most reliable)
-                if 'SMILES_CANONICAL' in line and 'CACTVS' in line:
-                    # Extract last quoted or unquoted token
-                    m = re.search(r'"([^"]{5,})"\\s*$', line)
-                    if not m:
-                        m = re.search(r'"([^"]{5,})"', line)
-                    if m:
-                        smiles = m.group(1)
-                        break
-
-            # Fallback: any SMILES line
-            if not smiles:
-                for line in content.split('\n'):
-                    line = line.strip()
-                    if 'SMILES' in line and not line.startswith('_'):
-                        m = re.search(r'"([A-Za-z0-9@\[\]()=#\+\-\./\\%]{5,})"', line)
-                        if m:
-                            smiles = m.group(1)
-                            break
+            smiles = _smiles_from_ccd(content)
 
             if smiles:
                 mol = Chem.MolFromSmiles(smiles)
@@ -388,19 +451,93 @@ def _load_molecule(path: str):
         return None
 
 
+_PREDICTOR_KEYWORDS = ("ALPHAFOLD", "COLABFOLD", "ESMFOLD", "ROSETTAFOLD", "OPENFOLD",
+                       "BOLTZ", "CHAI-1", "CHAI_1", "THEORETICAL MODEL", "ESM METAGENOMIC")
+
+
+def _confidence_signal(pdb_path: str, residues):
+    """
+    Decide what the B-factor column means. Returns (mean_value, kind) with kind:
+      "plddt"   predicted structure; value is mean pLDDT on a 0-100 scale
+      "bfactor" experimental structure; value is the mean B-factor
+      "none"    B-factors are uninformative (constant / all zero)
+
+    Predicted if EITHER the file header names a predictor, OR every residue has
+    one uniform B-factor across all its atoms (a per-residue score — real
+    refinement gives each atom its own B) with values inside 0-100.
+    """
+    import numpy as np
+    try:
+        with open(pdb_path, errors="ignore") as fh:
+            header = "".join(next(fh, "") for _ in range(300)).upper()
+    except OSError:
+        header = ""
+    named = any(k in header for k in _PREDICTOR_KEYWORDS)
+
+    per_res, uniform = [], 0
+    for res in residues:
+        bs = [a.bfactor for a in res]
+        if not bs:
+            continue
+        per_res.append(float(np.mean(bs)))
+        if max(bs) - min(bs) < 1e-3:
+            uniform += 1
+    if not per_res:
+        return 20.0, "bfactor"
+    arr = np.array(per_res)
+    all_atoms = [a.bfactor for res in residues for a in res]
+    if np.ptp(all_atoms) < 1e-3:                    # constant everywhere (e.g. all 0.00)
+        return float(arr.mean()), "none"
+
+    mostly_uniform = uniform / len(per_res) >= 0.95
+    in_range = arr.min() >= 0.0 and arr.max() <= 100.0
+    if named or (mostly_uniform and in_range):
+        scale = 100.0 if arr.max() <= 1.0 else 1.0   # some tools write pLDDT as 0-1
+        return float(arr.mean() * scale), "plddt"
+    return float(np.mean(all_atoms)), "bfactor"
+
+
+def _chain_residue_areas(pdb_path: str, chain: Optional[str]):
+    """
+    Per-residue SASA computed on the target chain ALONE. Partner chains in the
+    file (e.g. a ligand-bound complex) would otherwise bury part of the
+    epitope and make it look less exposed than it is for a free target.
+    """
+    import freesasa
+    if not chain:
+        return freesasa.calc(freesasa.Structure(pdb_path)).residueAreas()
+    import os, tempfile
+    from Bio.PDB import PDBParser, PDBIO, Select
+
+    class _OnlyChain(Select):
+        def accept_chain(self, c):
+            return c.id == chain
+        def accept_residue(self, r):
+            return r.id[0] == " "          # protein residues only, no waters/ligands
+
+    struct = PDBParser(QUIET=True).get_structure("t", pdb_path)
+    io = PDBIO(); io.set_structure(struct)
+    fd, tmp = tempfile.mkstemp(suffix=".pdb"); os.close(fd)
+    try:
+        io.save(tmp, _OnlyChain())
+        return freesasa.calc(freesasa.Structure(tmp)).residueAreas()
+    finally:
+        os.unlink(tmp)
+
+
 def _build_report(overall: float, factors: dict,
                    warnings: list, target_type: str) -> DifficultyReport:
-    overall = round(overall, 1)
-    if overall < 25:
+    """`overall` arrives as raw difficulty (low = easy). It is reported inverted
+    (high = easy) so the gauge and grade thresholds in the UI line up:
+    UI grade: >75 Easy, >50 Medium, >30 Hard, else Very Hard."""
+    raw_difficulty = round(overall, 1)
+    if raw_difficulty < 25:
         grade = "Easy"
         n_designs = 2000
-    elif overall < 45:
-        grade = "Doable"
-        n_designs = 3000
-    elif overall < 60:
+    elif raw_difficulty < 50:
         grade = "Medium"
         n_designs = 5000
-    elif overall < 70:
+    elif raw_difficulty < 70:
         grade = "Hard"
         n_designs = 10000
     else:
@@ -408,12 +545,13 @@ def _build_report(overall: float, factors: dict,
         n_designs = 20000
 
     return DifficultyReport(
-        overall            = overall,
+        overall            = round(100 - raw_difficulty, 1),
         grade              = grade,
         factors            = factors,
         recommended_designs = n_designs,
         warnings           = warnings,
         target_type        = target_type,
+        config             = scoring_config(),
     )
 
 
@@ -426,4 +564,5 @@ def _default_medium_report(target_type: str,
         recommended_designs = 5000,
         warnings           = [warning] if warning else [],
         target_type        = target_type,
+        config             = scoring_config(),
     )

@@ -585,6 +585,7 @@
   }
 
   .stage-dot.pending  { border-color: var(--grey-3); color: var(--grey-3); }
+  .stage-dot.queued   { border-color: var(--amber); color: var(--amber); border-style: dashed; }
   .stage-dot.running  { border-color: var(--teal); color: var(--teal);
                         box-shadow: 0 0 16px var(--teal); animation: pulse 2s infinite; }
   .stage-dot.completed { border-color: var(--teal); background: var(--teal); color: var(--navy); }
@@ -845,6 +846,7 @@
   .status-badge.completed { background: rgba(61,214,140,0.15); color: var(--green); }
   .status-badge.failed    { background: rgba(255,92,122,0.15); color: var(--red); }
   .status-badge.pending   { background: rgba(126,149,184,0.15); color: var(--grey-2); }
+  .status-badge.queued    { background: rgba(255,184,0,0.12); color: var(--amber); }
 
   .log-box {
     background: var(--navy);
@@ -1299,10 +1301,11 @@ function recommendMaxResubmits(grade, targetType) {
 }
 
 const API = {
-  async scoreTarget(file, targetType) {
+  async scoreTarget(file, targetType, chain) {
     const fd = new FormData();
     fd.append('file', file);
     fd.append('target_type', targetType);
+    if (chain) fd.append('chain', chain);
     const r = await fetch('/api/score-difficulty', { method: 'POST', body: fd });
     return r.json();
   },
@@ -1365,6 +1368,7 @@ function Spinner() { return <span className="spinner" />; }
 function StatusBadge({ status }) {
   const labels = { running: '● Running', completed: '✓ Complete',
                    failed: '✗ Failed', pending: '○ Pending',
+                   queued: '◌ In queue',
                    cancelled: '✗ Cancelled' };
   return <span className={`status-badge ${status}`}>{labels[status] || status}</span>;
 }
@@ -1461,11 +1465,11 @@ function UploadPage({ onNext }) {
         const r = await fetch('/api/score-difficulty-by-path', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ file_path: file._path, target_type: targetType }),
+          body: JSON.stringify({ file_path: file._path, target_type: targetType, chain }),
         });
         diff = await r.json();
       } else {
-        diff = await API.scoreTarget(file, targetType);
+        diff = await API.scoreTarget(file, targetType, chain);
       }
       onNext({ file, jobName, targetType, chain, hotspots,
         difficulty: diff });
@@ -1926,13 +1930,17 @@ function DifficultyPage({ data, onBack, onSubmit }) {
     const sasa   = autoHots.details?.sasa   || {};
     const sel    = hotspots;
     setDifficulty(d => {
+          const cfg = d.config;            // weights/bands come from the backend scorer
+          if (!cfg) return d;
           const factors = { ...d.factors };
           // Epitope chemistry: apolar (hydrophobic) fraction of the patch's SASA (freesasa)
           let ap = 0, totSasa = 0;
           sel.forEach(h => { const a = sasa[h]; if (a) { ap += a.apolar; totSasa += a.total; } });
           if (totSasa > 0) {
             const frac = ap / totSasa;
-            const s = frac >= 0.60 ? 15 : frac >= 0.45 ? 30 : frac >= 0.30 ? 45 : 70;
+            const eb = cfg.epitope_bands;
+            const hit = eb.min_fraction.find(([t]) => frac >= t);
+            const s = hit ? hit[1] : eb.fallback;
             factors.epitope_chemistry = { score: s, value: Math.round(100*frac),
               unit: '% hydrophobic surface', note: `${Math.round(100*frac)}% hydrophobic surface` };
           }
@@ -1942,11 +1950,13 @@ function DifficultyPage({ data, onBack, onSubmit }) {
             let mx = 0;
             for (let i=0;i<pts.length;i++) for (let j=i+1;j<pts.length;j++)
               mx = Math.max(mx, Math.hypot(pts[i][0]-pts[j][0], pts[i][1]-pts[j][1], pts[i][2]-pts[j][2]));
-            const s = mx <= 20 ? 15 : mx <= 30 ? 40 : 70;
+            const pb = cfg.patch_bands;
+            const hit = pb.max_spread_A.find(([t]) => mx <= t);
+            const s = hit ? hit[1] : pb.fallback;
             factors.hotspot_patch = { score: s, value: +mx.toFixed(1),
               unit: 'Å spread', note: `Hotspots span ${mx.toFixed(1)} Å` };
           }
-          const W = { epitope_chemistry:0.30, hotspot_patch:0.25, flexibility:0.20, globularity:0.15, target_size:0.10 };
+          const W = cfg.weights;
           const present = Object.keys(W).filter(k => factors[k]);
           const wtot = present.reduce((a,k)=>a+W[k],0) || 1;
           const overall = present.reduce((a,k)=>a + factors[k].score*(W[k]/wtot), 0);
@@ -2600,7 +2610,9 @@ function StatusPage({ jobId, onResults, onNewJob }) {
       </div>
       <h1 className="page-title">{job.name}</h1>
       <p className="page-sub" style={{marginBottom:32}}>
-        Job submitted to cluster — polling for updates every 8 seconds.
+        {job.status === 'queued'
+          ? 'Submitted — waiting in the cluster queue for a free GPU. Nothing has started yet.'
+          : 'Job submitted to cluster — polling for updates every 8 seconds.'}
       </p>
 
       {/* Pipeline visualization */}
@@ -2613,6 +2625,7 @@ function StatusPage({ jobId, onResults, onNewJob }) {
                 <div className={`stage-dot ${s.status}`}>
                   {s.status === 'completed' ? '✓' :
                    s.status === 'running'   ? '●' :
+                   s.status === 'queued'    ? '◌' :
                    s.status === 'failed'    ? '✗' : (i + 1)}
                 </div>
                 <div className={`stage-label ${s.status === 'running' ? 'active' : ''}`}>
