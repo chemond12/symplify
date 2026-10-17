@@ -20,6 +20,7 @@ BindCraft flow:
 import json
 import os
 import sys
+import subprocess
 from pathlib import Path
 
 import db
@@ -87,6 +88,88 @@ def _assign_chain_id(pdb_path: str, chain_id: str = "A") -> None:
     with open(pdb_path, "w") as f:
         f.writelines(fixed)
 
+def _pdb_residues(pdb_path: str) -> dict:
+    """chain -> set of residue numbers (ATOM records, first model only)."""
+    residues = {}
+    with open(pdb_path) as f:
+        for line in f:
+            if line.startswith("ENDMDL"):
+                break
+            if line.startswith("ATOM"):
+                try:
+                    residues.setdefault(line[21], set()).add(int(line[22:26]))
+                except ValueError:
+                    pass
+    return residues
+
+
+def _first_model_pdb(pdb_path: str, out_dir) -> str:
+    """If the file has several MODEL records (NMR ensembles), write model 1 alone."""
+    with open(pdb_path) as f:
+        lines = f.readlines()
+    if sum(1 for l in lines if l.startswith("MODEL")) <= 1:
+        return pdb_path
+    kept = []
+    for l in lines:
+        kept.append(l)
+        if l.startswith("ENDMDL"):
+            break
+    kept.append("END\n")
+    out_path = str(Path(out_dir) / "target_model1.pdb")
+    with open(out_path, "w") as f:
+        f.writelines(kept)
+    return out_path
+
+def _ligand_pdb_for_rfd3(pdb_path: str) -> str:
+    """
+    Prepare a PDB-format small-molecule target for RFD3.
+    - The ligand goes on chain Z: RFD3's designed binder is chain A, and a
+      ligand on chain A raises "Ligand chain(s) ['A'] overlap".
+    - A molecule spread over several residues (a macrocyclic peptide such as
+      1LCM) is written as ONE residue named UNL with unique atom names,
+      keeping the original coordinates and CONECT bonds.
+    Deterministic: no conformer is generated, so repeated calls agree.
+    """
+    path = Path(pdb_path)
+    if path.stem.endswith("_ligand"):
+        return pdb_path
+    waters = {"HOH", "WAT", "H2O", "DOD"}
+    atoms, conect = [], []
+    with open(path, errors="ignore") as f:
+        for line in f:
+            if line.startswith("ENDMDL"):
+                break
+            if line.startswith("CONECT"):
+                conect.append(line)
+            elif (line.startswith(("ATOM", "HETATM"))
+                  and line[17:20].strip() not in waters
+                  and line[16] in (" ", "A")):
+                atoms.append(line)
+    if not atoms:
+        return pdb_path
+
+    residues = {(l[21], l[22:27]) for l in atoms}
+    out_path = str(path.with_name(path.stem + "_ligand.pdb"))
+    counts, out = {}, []
+    for line in atoms:
+        if len(residues) > 1:
+            el = (line[76:78].strip() if len(line) > 77 else "") \
+                 or line[12:16].strip().lstrip("0123456789")[:1]
+            el = el.capitalize()
+            counts[el] = counts.get(el, 0) + 1
+            name  = f"{el}{counts[el]}"
+            name4 = f"{name:<4}" if len(name) == 4 else f" {name:<3}"
+            resname, resseq = "UNL", "   1"
+        else:
+            name4, resname, resseq = line[12:16], line[17:20], line[22:26]
+        out.append("HETATM" + line[6:12] + name4 + " " + resname
+                   + " Z" + resseq + " " + line[27:])
+    with open(out_path, "w") as f:
+        f.writelines(out)
+        f.writelines(conect)
+        f.write("END\n")
+    return out_path
+
 def _ensure_ligand_pdb(path: str) -> str:
     """
     RFD3 and the _detect_ligand* helpers above need real ATOM/HETATM
@@ -95,6 +178,8 @@ def _ensure_ligand_pdb(path: str) -> str:
     so convert it to a proper PDB with a 3D conformer first. Leaves
     normal protein structure files (.pdb, full-structure .cif) untouched.
     """
+    if path.lower().endswith(".pdb"):
+        return _ligand_pdb_for_rfd3(path)
     if not path.lower().endswith((".cif", ".cif.gz")):
         return path
 
@@ -161,6 +246,21 @@ class PipelineRouter:
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.db_path      = Path(__file__).resolve().parent.parent / "symplify.db"
 
+    def _filter_args(self, config):
+        thr = config.get("thresholds") or {}
+        d   = self.defaults
+        return (
+            f"--screen_top_frac {config.get('screen_top_frac', d.get('screen_top_frac', 0.2))} "
+            f"--iptm_threshold {config.get('iptm_threshold', d.get('iptm_threshold', 0.8))} "
+            f"--ptm_threshold {config.get('ptm_threshold', d.get('ptm_threshold', 0.8))} "
+            f"--plddt_threshold {thr.get('plddt', 0.0)} "
+            f"--min_ipae_threshold {config.get('min_ipae_threshold', 1.0)} "
+            f"--rmsd_threshold {thr.get('rmsd', 2.5)} "
+            f"--dg_threshold {thr.get('dg', 1e9)} "
+            f"--unsat_hbonds_threshold {thr.get('delta_unsat_hbonds', 999.0)} "
+            f"--hydrophob_threshold {thr.get('surface_hydrophobicity', 999.0)} "
+        )
+    
     def submit(self, job_id, target_type, target_file, config):
         job_dir = self.workspace / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
@@ -184,6 +284,7 @@ class PipelineRouter:
         target_file = _ensure_ligand_pdb(job.get("target_file", ""))
         config["n_designs"] = n_designs
         db.confirm_full_run(job_id, n_designs)
+        db.update_stage(job_id, "awaiting_confirmation", "completed")
 
         job_dir = self.workspace / job_id
         log_dir = str(job_dir / "logs")
@@ -349,6 +450,7 @@ class PipelineRouter:
             f"--n_designs {n_designs} "
             f"--mpnn_per_bb {mpnn_per_bb} "
             f"--linker_repeats {linker_rep} "
+            f"{self._filter_args(config)}"
             f"--workers ${{SLURM_CPUS_PER_TASK:-32}}"
         )
 
@@ -412,7 +514,31 @@ class PipelineRouter:
         so resubmitting the identical generation command against the same
         out_dir picks up where it left off rather than regenerating designs
         already written to disk.
+
+        For rfd3_generation specifically, this also cascades: any downstream
+        stage (rf3_scoring, post_processing) that was submitted with a SLURM
+        --dependency=afterok pointing at the now-dead original job can never
+        satisfy that dependency once the original times out. Those jobs are
+        cancelled and resubmitted pointed at the new job ID instead.
         """
+        if stage_name == "bindcraft_design":
+            job     = db.get_job(job_id)
+            job_dir = self.workspace / job_id
+            log_dir = str(job_dir / "logs")
+            return self._resubmit_bindcraft(job_id, job, job_dir, log_dir)
+
+        if stage_name == "rf3_scoring":
+            job     = db.get_job(job_id)
+            job_dir = self.workspace / job_id
+            log_dir = str(job_dir / "logs")
+            return self._resubmit_rf3_scoring(job_id, job, job_dir, log_dir)
+
+        if stage_name != "rfd3_generation":
+            raise NotImplementedError(
+                f"Resubmit not implemented for stage '{stage_name}' yet — "
+                f"only rfd3_generation and bindcraft_design are currently supported."
+            )
+
         job = db.get_job(job_id)
         if not job:
             raise ValueError(f"Job {job_id} not found")
@@ -421,15 +547,6 @@ class PipelineRouter:
         target_file = job.get("target_file", "")
         job_dir     = self.workspace / job_id
         log_dir     = str(job_dir / "logs")
-
-        if stage_name == "bindcraft_design":
-            return self._resubmit_bindcraft(job_id, job, job_dir, log_dir)
-
-        if stage_name != "rfd3_generation":
-            raise NotImplementedError(
-                f"Resubmit not implemented for stage '{stage_name}' yet — "
-                f"only rfd3_generation and bindcraft_design are currently supported."
-            )
 
         n_designs    = config.get("n_designs", 5000)
         mpnn_per_bb  = config.get("mpnn_per_bb", self.defaults.get("mpnn_per_backbone", 8))
@@ -444,7 +561,12 @@ class PipelineRouter:
             "FOUNDRY_CHECKPOINT_DIRS": self.paths.get("foundry_weights_dir",
                                        "/scratch/network/ch8337/foundry_weights"),
         }
-        res = self.resources
+        module   = self.envs.get("base_module", "")
+        rfd3_env = self.envs.get("rfd3", "rfd3")
+        bc_env   = self.envs.get("bindcraft", "BindCraft")
+        bc_path  = self.paths.get("bindcraft_dir", "")
+        res      = self.resources
+
         base_cmd = (
             f"python {pipeline_script} "
             f"--config {rfd3_cfg_path} "
@@ -453,10 +575,12 @@ class PipelineRouter:
             f"--n_designs {n_designs} "
             f"--mpnn_per_bb {mpnn_per_bb} "
             f"--linker_repeats {linker_rep} "
+            f"{self._filter_args(config)}"
             f"--workers ${{SLURM_CPUS_PER_TASK:-32}}"
         )
 
-        spec = JobSpec(
+        # --- Resubmit generation+mpnn job ---
+        spec_gen = JobSpec(
             name        = f"sym_{job_id[:8]}_gen_resume",
             command     = base_cmd + " --skip_rf3 --stop_after mpnn",
             log_dir     = log_dir,
@@ -465,12 +589,187 @@ class PipelineRouter:
             mem_gb      = res.get("rfd3_generation", {}).get("mem_gb", 64),
             hours       = res.get("rfd3_generation", {}).get("hours", 24),
             env_vars    = env_vars,
-            conda_env   = self.envs.get("rfd3", "rfd3"),
-            module_load = self.envs.get("base_module", ""),
+            conda_env   = rfd3_env,
+            module_load = module,
         )
-        new_jid = self.scheduler.submit(spec)
-        print(f"[pipeline_router] Resubmitted rfd3_generation for job {job_id}: {new_jid}", flush=True)
-        return new_jid
+        new_gen_jid = self.scheduler.submit(spec_gen)
+        print(f"[pipeline_router] Resubmitted rfd3_generation for job {job_id}: {new_gen_jid}", flush=True)
+
+        db.update_stage(job_id, "rfd3_generation", "running", scheduler_id=str(new_gen_jid))
+        db.update_stage(job_id, "ligandmpnn", "pending", scheduler_id=str(new_gen_jid))
+
+        # --- Cancel + resubmit downstream stages whose dependency is now dead ---
+        stages = db.get_stages(job_id)
+
+        rf3_stage  = next((s for s in stages if s["stage_name"] == "rf3_scoring"), None)
+        post_stage = next((s for s in stages if s["stage_name"] == "post_processing"), None)
+
+        old_rf3_sid = rf3_stage.get("scheduler_id") if rf3_stage else None
+        if old_rf3_sid:
+            try:
+                subprocess.run(["scancel", str(old_rf3_sid)], capture_output=True, timeout=10)
+                print(f"[pipeline_router] Cancelled orphaned rf3_scoring job {old_rf3_sid}", flush=True)
+            except Exception as e:
+                print(f"[pipeline_router] WARNING: failed to cancel {old_rf3_sid}: {e}", flush=True)
+
+        old_post_sid = post_stage.get("scheduler_id") if post_stage else None
+        if old_post_sid:
+            try:
+                subprocess.run(["scancel", str(old_post_sid)], capture_output=True, timeout=10)
+                print(f"[pipeline_router] Cancelled orphaned post_processing job {old_post_sid}", flush=True)
+            except Exception as e:
+                print(f"[pipeline_router] WARNING: failed to cancel {old_post_sid}: {e}", flush=True)
+
+        # Job 4 (re-created): full RF3 scoring, now depending on the new gen job
+        spec4 = JobSpec(
+            name        = f"sym_{job_id[:8]}_rf3_resume",
+            command     = base_cmd + " --skip_rfd3 --skip_mpnn --stop_after rf3",
+            log_dir     = log_dir,
+            gpus        = res.get("rf3_scoring", {}).get("gpus", 1),
+            cpus        = res.get("rf3_scoring", {}).get("cpus", 8),
+            mem_gb      = res.get("rf3_scoring", {}).get("mem_gb", 64),
+            hours       = res.get("rf3_scoring", {}).get("hours", 24),
+            depends_on  = [new_gen_jid],
+            env_vars    = env_vars,
+            conda_env   = rfd3_env,
+            module_load = module,
+        )
+        new_rf3_jid = self.scheduler.submit(spec4)
+        db.update_stage(job_id, "rf3_scoring", "pending", scheduler_id=str(new_rf3_jid))
+        print(f"[pipeline_router] Resubmitted rf3_scoring for job {job_id}: {new_rf3_jid}", flush=True)
+
+        # Job 5 (re-created): post-processing, now depending on the new rf3 job
+        spec5 = JobSpec(
+            name        = f"sym_{job_id[:8]}_post_resume",
+            command     = (base_cmd + " --skip_rfd3 --skip_mpnn --skip_rf3"
+                           f" --job_id {job_id} --db_path {self.db_path}"),
+            log_dir     = log_dir,
+            gpus        = 0,
+            cpus        = res.get("post_processing", {}).get("cpus", 32),
+            mem_gb      = res.get("post_processing", {}).get("mem_gb", 128),
+            hours       = res.get("post_processing", {}).get("hours", 12),
+            depends_on  = [new_rf3_jid],
+            env_vars    = {"PYTHONPATH": f"{bc_path}:${{PYTHONPATH:-}}"},
+            conda_env   = bc_env,
+            module_load = module,
+        )
+        new_post_jid = self.scheduler.submit(spec5)
+        db.update_stage(job_id, "post_processing", "pending", scheduler_id=str(new_post_jid))
+        print(f"[pipeline_router] Resubmitted post_processing for job {job_id}: {new_post_jid}", flush=True)
+
+        return new_gen_jid
+
+    def submit_watchdog(self, job_id, stage_name, watched_sid, dry_run=False):
+        """
+        Tiny CPU job that starts when `watched_sid` ends (afterany) and
+        resubmits the stage if it timed out, so resubmission needs no server.
+        dry_run=True skips the dependency and only reports what it can see.
+        """
+        backend = Path(__file__).resolve().parent
+        root    = backend.parent
+        spec = JobSpec(
+            name            = f"sym_{job_id[:8]}_wd_{stage_name[:6]}",
+            command         = (f"cd {root} && python {backend}/timeout_watchdog.py "
+                               f"{job_id} {stage_name} {watched_sid}"
+                               + (" --dry-run" if dry_run else "")),
+            log_dir         = str(self.workspace / job_id / "logs"),
+            gpus            = 0,
+            cpus            = 1,
+            mem_gb          = 4,
+            hours           = 1,
+            depends_on      = [] if dry_run else [str(watched_sid)],
+            dependency_type = "afterany",
+            conda_env       = "symplify",
+            module_load     = self.envs.get("base_module", ""),
+        )
+        return self.scheduler.submit(spec)
+
+    def _resubmit_rf3_scoring(self, job_id, job, job_dir, log_dir):
+        """
+        Resubmit a timed-out full-run RF3 scoring job. run_rf3_scoring()
+        resumes from rf3_outputs/results.jsonl, so only unscored designs run.
+        No SLURM dependency: generation finished before scoring started, and
+        depending on a long-finished job fails with "Job dependency problem".
+        Post-processing is cancelled and resubmitted behind the new job.
+        """
+        config      = job.get("config") or {}
+        target_file = job.get("target_file", "")
+        n_designs   = config.get("n_designs", 5000)
+        mpnn_per_bb = config.get("mpnn_per_bb", self.defaults.get("mpnn_per_backbone", 8))
+        linker_rep  = config.get("linker_repeats", self.defaults.get("linker_repeats", 3))
+        pipeline_script = self.pipeline_dir / "rfd3" / "pipeline_rfd3.py"
+        rfd3_cfg_path   = str(job_dir / "rfd3_config.json")
+
+        env_vars = {
+            "CCD_MIRROR_PATH":         self.paths.get("ccd_mirror", ""),
+            "RFD3_CHECKPOINT":         self.paths.get("rfd3_checkpoint",
+                                       "/scratch/network/ch8337/foundry_weights/rfd3_latest.ckpt"),
+            "FOUNDRY_CHECKPOINT_DIRS": self.paths.get("foundry_weights_dir",
+                                       "/scratch/network/ch8337/foundry_weights"),
+        }
+        module   = self.envs.get("base_module", "")
+        rfd3_env = self.envs.get("rfd3", "rfd3")
+        bc_env   = self.envs.get("bindcraft", "BindCraft")
+        bc_path  = self.paths.get("bindcraft_dir", "")
+        res      = self.resources
+
+        base_cmd = (
+            f"python {pipeline_script} "
+            f"--config {rfd3_cfg_path} "
+            f"--input_pdb {target_file} "
+            f"--output_dir {job_dir}/full_run "
+            f"--n_designs {n_designs} "
+            f"--mpnn_per_bb {mpnn_per_bb} "
+            f"--linker_repeats {linker_rep} "
+            f"{self._filter_args(config)}"
+            f"--workers ${{SLURM_CPUS_PER_TASK:-32}}"
+        )
+
+        spec4 = JobSpec(
+            name        = f"sym_{job_id[:8]}_rf3_resume",
+            command     = base_cmd + " --skip_rfd3 --skip_mpnn --stop_after rf3",
+            log_dir     = log_dir,
+            gpus        = res.get("rf3_scoring", {}).get("gpus", 1),
+            cpus        = res.get("rf3_scoring", {}).get("cpus", 8),
+            mem_gb      = res.get("rf3_scoring", {}).get("mem_gb", 64),
+            hours       = res.get("rf3_scoring", {}).get("hours", 24),
+            env_vars    = env_vars,
+            conda_env   = rfd3_env,
+            module_load = module,
+        )
+        new_rf3_jid = self.scheduler.submit(spec4)
+        db.update_stage(job_id, "rf3_scoring", "running", scheduler_id=str(new_rf3_jid))
+        print(f"[pipeline_router] Resubmitted rf3_scoring for job {job_id}: {new_rf3_jid}", flush=True)
+
+        stages     = db.get_stages(job_id)
+        post_stage = next((s for s in stages if s["stage_name"] == "post_processing"), None)
+        old_post_sid = post_stage.get("scheduler_id") if post_stage else None
+        if old_post_sid:
+            try:
+                subprocess.run(["scancel", str(old_post_sid)], capture_output=True, timeout=10)
+                print(f"[pipeline_router] Cancelled orphaned post_processing job {old_post_sid}", flush=True)
+            except Exception as e:
+                print(f"[pipeline_router] WARNING: failed to cancel {old_post_sid}: {e}", flush=True)
+
+        spec5 = JobSpec(
+            name        = f"sym_{job_id[:8]}_post_resume",
+            command     = (base_cmd + " --skip_rfd3 --skip_mpnn --skip_rf3"
+                           f" --job_id {job_id} --db_path {self.db_path}"),
+            log_dir     = log_dir,
+            gpus        = 0,
+            cpus        = res.get("post_processing", {}).get("cpus", 32),
+            mem_gb      = res.get("post_processing", {}).get("mem_gb", 128),
+            hours       = res.get("post_processing", {}).get("hours", 12),
+            depends_on  = [new_rf3_jid],
+            env_vars    = {"PYTHONPATH": f"{bc_path}:${{PYTHONPATH:-}}"},
+            conda_env   = bc_env,
+            module_load = module,
+        )
+        new_post_jid = self.scheduler.submit(spec5)
+        db.update_stage(job_id, "post_processing", "pending", scheduler_id=str(new_post_jid))
+        print(f"[pipeline_router] Resubmitted post_processing for job {job_id}: {new_post_jid}", flush=True)
+
+        return new_rf3_jid
 
     # -----------------------------------------------------------------------
     # BindCraft (Jobs 1 + 2) — unchanged
@@ -482,21 +781,29 @@ class PipelineRouter:
         in Accepted/ on every run, so resubmitting the same settings file
         against the same design_path resumes toward number_of_final_designs
         rather than restarting the count from zero.
+
+        Also cancels and resubmits post_processing, whose afterok dependency
+        pointed at the now-dead design job and can never be satisfied.
         """
+        config        = job.get("config") or {}
+        linker_rep    = config.get("linker_repeats", self.defaults.get("linker_repeats", 3))
         settings_path = str(job_dir / "bc_settings.json")
-        target_file   = job.get("target_file", "")
+        with open(settings_path) as f:
+            target_file = json.load(f).get("starting_pdb", job.get("target_file", ""))
         bc_dir        = self.paths.get("bindcraft_dir", "")
         module        = self.envs.get("base_module", "")
         bc_env        = self.envs.get("bindcraft", "BindCraft")
+        pipeline_script = self.pipeline_dir / "bindcraft" / "pipeline_bindcraft.py"
         res           = self.resources
 
+        # --- Resubmit the design job ---
         bc_cmd = (
             f"python {bc_dir}/bindcraft.py "
             f"--settings {settings_path} "
             f"--filters {bc_dir}/settings_filters/default_filters.json "
             f"--advanced {bc_dir}/settings_advanced/default_4stage_multimer.json"
         )
-        spec = JobSpec(
+        spec1 = JobSpec(
             name        = f"sym_{job_id[:8]}_bc_resume",
             command     = bc_cmd,
             log_dir     = log_dir,
@@ -507,9 +814,51 @@ class PipelineRouter:
             conda_env   = bc_env,
             module_load = module,
         )
-        new_jid = self.scheduler.submit(spec)
-        print(f"[pipeline_router] Resubmitted bindcraft_design for job {job_id}: {new_jid}", flush=True)
-        return new_jid
+        new_bc_jid = self.scheduler.submit(spec1)
+        print(f"[pipeline_router] Resubmitted bindcraft_design for job {job_id}: {new_bc_jid}", flush=True)
+        db.update_stage(job_id, "bindcraft_design", "running", scheduler_id=str(new_bc_jid))
+
+        # --- Cancel the orphaned post-processing job ---
+        stages     = db.get_stages(job_id)
+        post_stage = next((s for s in stages if s["stage_name"] == "post_processing"), None)
+        old_post_sid = post_stage.get("scheduler_id") if post_stage else None
+        if old_post_sid:
+            try:
+                subprocess.run(["scancel", str(old_post_sid)], capture_output=True, timeout=10)
+                print(f"[pipeline_router] Cancelled orphaned post_processing job {old_post_sid}", flush=True)
+            except Exception as e:
+                print(f"[pipeline_router] WARNING: failed to cancel {old_post_sid}: {e}", flush=True)
+
+        # --- Resubmit post-processing, depending on the new design job ---
+        post_cmd = (
+            f"python {pipeline_script} "
+            f"--bindcraft_dir {job_dir} "
+            f"--output_dir {job_dir}/results "
+            f"--target_pdb {target_file} "
+            f"--binder_chain B "
+            f"--linker_repeats {linker_rep} "
+            f"--skip_min_ipae "
+            f"--job_id {job_id} --db_path {self.db_path} "
+            f"--workers ${{SLURM_CPUS_PER_TASK:-16}}"
+        )
+        spec2 = JobSpec(
+            name        = f"sym_{job_id[:8]}_post_resume",
+            command     = post_cmd,
+            log_dir     = log_dir,
+            gpus        = 0,
+            cpus        = res.get("bindcraft_post", {}).get("cpus", 16),
+            mem_gb      = res.get("bindcraft_post", {}).get("mem_gb", 64),
+            hours       = res.get("bindcraft_post", {}).get("hours", 6),
+            depends_on  = [new_bc_jid],
+            env_vars    = {"PYTHONPATH": f"{bc_dir}:${{PYTHONPATH:-}}"},
+            conda_env   = bc_env,
+            module_load = module,
+        )
+        new_post_jid = self.scheduler.submit(spec2)
+        db.update_stage(job_id, "post_processing", "pending", scheduler_id=str(new_post_jid))
+        print(f"[pipeline_router] Resubmitted post_processing for job {job_id}: {new_post_jid}", flush=True)
+
+        return new_bc_jid
     
     def _submit_bindcraft(self, job_id, target_file, config, job_dir, log_dir):
         defaults    = self.defaults
@@ -524,6 +873,7 @@ class PipelineRouter:
         module          = self.envs.get("base_module", "")
         bc_env          = self.envs.get("bindcraft", "BindCraft")
         res             = self.resources
+        target_file = _first_model_pdb(target_file, job_dir)
 
         # BindCraft's target_hotspot_residues wants bare residue numbers
         # (no chain letter), comma-separated, or null if none specified —
@@ -531,6 +881,21 @@ class PipelineRouter:
         hotspot_nums = [h[len(chain):] if h.startswith(chain) else h
                         for h in hotspots]
         hotspot_str  = ",".join(hotspot_nums) if hotspot_nums else None
+        present = _pdb_residues(target_file).get(chain, set())
+        if not present:
+            raise ValueError(f"Chain {chain} has no residues in {Path(target_file).name}")
+
+        def _in_chain(h):
+            try:
+                return int(h) in present
+            except ValueError:
+                return False
+
+        missing = [h for h in hotspot_nums if not _in_chain(h)]
+        if missing:
+            raise ValueError(
+                f"Hotspot residues not found in chain {chain} of {Path(target_file).name} "
+                f"(residues {min(present)}-{max(present)}): {missing}")
 
         settings_path = str(job_dir / "bc_settings.json")
         settings = {

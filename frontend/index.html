@@ -1292,6 +1292,15 @@ function initMolCanvas() {
 // ============================================================
 // API helpers
 // ============================================================
+// Recommended auto-resubmit limits by difficulty grade (starting values, tune with experience)
+function recommendMaxResubmits(grade, targetType) {
+  const table = {
+    protein:        { 'Easy': 5, 'Medium': 7, 'Hard': 10, 'Very Hard': 15 },  // BindCraft
+    small_molecule: { 'Easy': 2, 'Medium': 3, 'Hard': 5,  'Very Hard': 8  },  // RFD3
+  };
+  return (table[targetType] || table.protein)[grade] ?? 5;
+}
+
 const API = {
   async scoreTarget(file, targetType) {
     const fd = new FormData();
@@ -1338,6 +1347,14 @@ const API = {
   async getJob(id)     { return (await fetch(`/api/jobs/${id}`)).json(); },
   async listJobs()     { return (await fetch('/api/jobs')).json(); },
   async getResults(id) { return (await fetch(`/api/jobs/${id}/results`)).json(); },
+    async extendResubmits(id, additional) {
+    const r = await fetch(`/api/jobs/${id}/extend-resubmits`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ additional }),
+    });
+    return r.json();
+  },
   structureUrl(jobId, rank, linker=false) {
     return `/api/jobs/${jobId}/results/${rank}/structure?linker=${linker}`;
   },
@@ -1373,23 +1390,10 @@ function UploadPage({ onNext }) {
   const [chain,      setChain]      = useState('A');
   const [hotspots,   setHotspots]   = useState([]);
   const [hotInput,   setHotInput]   = useState('');
-  const [linkerRep,  setLinkerRep]  = useState(3);
-  const [nDesigns,   setNDesigns]   = useState('');
-  const [targetPass, setTargetPass] = useState(96);
-  const [showAdv,    setShowAdv]    = useState(false);
   const [loading,    setLoading]    = useState(false);
   const [analyzing,  setAnalyzing]  = useState(false);
   const [chainInfo,  setChainInfo]  = useState(null);  // {chains, suggested_chain, suggested_type}
   const [jobName,    setJobName]    = useState('');
-  // Metric thresholds
-  const [iptmThresh,  setIptmThresh]  = useState(0.8);
-  const [ptmThresh,   setPtmThresh]   = useState(0.8);
-  const [plddt,       setPlddt]       = useState(0.8);
-  const [rmsd,        setRmsd]        = useState(2.5);
-  const [dg,          setDg]          = useState(-20);
-  const [unsatHbonds, setUnsatHbonds] = useState(2);
-  const [hydrophob,   setHydrophob]   = useState(0.25);
-  const [minIpae,     setMinIpae]     = useState(1.0);
 
   const [pdbIdInput, setPdbIdInput] = useState('');
   const [pdbFetching, setPdbFetching] = useState(false);
@@ -1467,14 +1471,7 @@ function UploadPage({ onNext }) {
         diff = await API.scoreTarget(file, targetType);
       }
       onNext({ file, jobName, targetType, chain, hotspots,
-               linkerRep,
-               nDesigns: nDesigns || (targetType === 'protein' ? 100 : null),
-               targetPass,
-               thresholds: { iptm: iptmThresh, ptm: ptmThresh, plddt,
-                             rmsd, dg, delta_unsat_hbonds: unsatHbonds,
-                             surface_hydrophobicity: hydrophob,
-                             min_ipae: minIpae },
-               difficulty: diff });
+        difficulty: diff });
     } catch(e) {
       setLoading(false);
     }
@@ -1498,7 +1495,7 @@ function UploadPage({ onNext }) {
         <div className="field-group" style={{marginBottom:16}}>
           <span className="field-label">Fetch from RCSB</span>
           <div className="input-row">
-            <input className="input" placeholder="PDB ID (e.g. 1KDM) or ligand code (e.g. 7V7)"
+            <input className="input" placeholder="PDB ID or ligand code"
                    value={pdbIdInput} maxLength={4}
                    style={{textTransform:'uppercase', letterSpacing:2, fontFamily:'var(--font-mono)'}}
                    onChange={e => { setPdbIdInput(e.target.value.toUpperCase()); setPdbError(''); }}
@@ -1510,7 +1507,7 @@ function UploadPage({ onNext }) {
             </button>
           </div>
           {pdbError && <div style={{fontSize:12, color:'var(--red)', marginTop:4}}>{pdbError}</div>}
-          <div className="hint">4-char PDB ID for proteins · 2-3 char CCD code for ligands (e.g. HCY, 7V7) · Or upload a file below</div>
+          <div className="hint">4-char PDB ID for proteins · 2-3 char CCD code for ligands · Or upload a file below</div>
         </div>
 
         {/* File drop zone */}
@@ -1610,7 +1607,7 @@ function UploadPage({ onNext }) {
             </span>
           </span>
           <input className="input"
-                 placeholder={targetType === 'protein' ? 'e.g. A47, A52 — press Enter to add' : 'e.g. C10, N1'}
+                 placeholder={targetType === 'protein' ? 'e.g. A47, A52 — press Enter to add' : 'e.g. C10'}
                  value={hotInput}
                  onChange={e => setHotInput(e.target.value)}
                  onKeyDown={addHotspot} />
@@ -1627,68 +1624,6 @@ function UploadPage({ onNext }) {
           )}
           <div className="hint">Press Enter after each {targetType === 'protein' ? 'residue' : 'atom'} ID</div>
         </div>
-
-        {/* GS linker */}
-        <div className="field-group">
-          <span className="field-label">GS linker length</span>
-          <div className="input-row">
-            <input className="input" type="number" min="1" max="10"
-                   value={linkerRep}
-                   onChange={e => setLinkerRep(+e.target.value)} />
-            <div style={{display:'flex', alignItems:'center', color:'var(--grey-2)',
-                         fontSize:12, whiteSpace:'nowrap', paddingRight:4}}>
-              × GGGGS = {linkerRep * 5} residues
-            </div>
-          </div>
-        </div>
-
-        {/* Advanced */}
-        <button className="advanced-toggle" onClick={() => setShowAdv(!showAdv)}>
-          <span>{showAdv ? '▾' : '▸'}</span> Advanced options
-        </button>
-
-        {showAdv && (
-          <div className="advanced-panel">
-            <div className="advanced-grid">
-              <div className="field-group" style={{marginBottom:0}}>
-                <span className="field-label">Target passing designs</span>
-                <input className="input" type="number" value={targetPass}
-                       onChange={e => setTargetPass(+e.target.value)} />
-                <div className="hint">Used to recommend n_designs (default: 96 = one plate)</div>
-              </div>
-              {targetType === 'small_molecule' && (
-                <div className="field-group" style={{marginBottom:0}}>
-                  <span className="field-label">Override n_designs</span>
-                  <input className="input" type="number" placeholder="Auto (pilot-based)"
-                         value={nDesigns} onChange={e => setNDesigns(e.target.value)} />
-                </div>
-              )}
-            </div>
-            <div style={{marginTop:16, marginBottom:8}}>
-              <span className="field-label">Metric thresholds</span>
-            </div>
-            <div className="advanced-grid">
-              {[
-                ['ipTM threshold',       iptmThresh,  setIptmThresh,  0, 1, 0.01],
-                ['pTM threshold',        ptmThresh,   setPtmThresh,   0, 1, 0.01],
-                ['pLDDT threshold',      plddt,       setPlddt,       0, 1, 0.01],
-                ['min ipAE threshold',   minIpae,     setMinIpae,     0, 5, 0.1],
-                ['RMSD threshold (Å)',   rmsd,        setRmsd,        0, 10, 0.1],
-                ['ΔG threshold',         dg,          setDg,          -200, 0, 1],
-                ['Max unsat H-bonds',    unsatHbonds, setUnsatHbonds, 0, 10, 1],
-                ['Max surface hydrophob',hydrophob,   setHydrophob,   0, 1, 0.01],
-              ].map(([label, val, setter, min, max, step]) => (
-                <div key={label} className="field-group" style={{marginBottom:0}}>
-                  <span className="field-label">{label}</span>
-                  <input className="input" type="number"
-                         min={min} max={max} step={step}
-                         value={val}
-                         onChange={e => setter(parseFloat(e.target.value))} />
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
 
         <button className="btn-primary" onClick={handleSubmit}
                 disabled={!file || !jobName || loading || analyzing || !targetType}>
@@ -1938,6 +1873,14 @@ function DifficultyPage({ data, onBack, onSubmit }) {
   const [submitting, setSubmitting] = useState(false);
   const [showAll,    setShowAll]    = useState(false);
   const [difficulty, setDifficulty] = useState(data.difficulty);
+  const [resubOverride, setResubOverride] = useState(null);
+  const [advOpen, setAdvOpen] = useState(false);
+  const [adv, setAdv] = useState({
+    targetPass: 96, nDesigns: '',
+    iptm: 0.8, ptm: 0.8, plddt: 0.8, min_ipae: 1.0, rmsd: 2.5,
+    dg: -20, delta_unsat_hbonds: 2, surface_hydrophobicity: 0.25,
+  });
+  const setAdvField = (k, v) => setAdv(a => ({ ...a, [k]: v }));
 
   useEffect(() => {
     setLoadingH(true);
@@ -1979,20 +1922,36 @@ function DifficultyPage({ data, onBack, onSubmit }) {
   const gradeCol = grade === 'Easy' ? 'var(--green)' : grade === 'Medium' ? 'var(--amber)' :
                    grade === 'Hard' ? '#FF8C42' : 'var(--red)';
 
+  const recommendedResub = recommendMaxResubmits(grade, targetType);
+  const maxResubmits     = resubOverride ?? recommendedResub;
   const circumference = 2 * Math.PI * 48;
   const offset        = circumference * (1 - score / 100);
 
   async function handleSubmit() {
     setSubmitting(true);
+    const num = (v, d) => (v === '' || v === null || Number.isNaN(+v)) ? d : +v;
+    const thresholds = {
+      iptm:                   num(adv.iptm, 0.8),
+      ptm:                    num(adv.ptm, 0.8),
+      plddt:                  num(adv.plddt, 0.8),
+      rmsd:                   num(adv.rmsd, 2.5),
+      dg:                     num(adv.dg, -20),
+      delta_unsat_hbonds:     num(adv.delta_unsat_hbonds, 2),
+      surface_hydrophobicity: num(adv.surface_hydrophobicity, 0.25),
+      min_ipae:               num(adv.min_ipae, 1.0),
+    };
+    const nDesigns = (adv.nDesigns !== '' && !Number.isNaN(parseInt(adv.nDesigns)))
+      ? parseInt(adv.nDesigns)
+      : (targetType === 'protein' ? 100 : null);
     const job = await API.createJob(
       file, data.jobName, targetType,
-      { hotspots, linker_repeats: data.linkerRep,
-        n_designs: data.nDesigns, chain: data.chain,
-        target_passing:     data.targetPass || 96,
-        iptm_threshold:     data.thresholds?.iptm     || 0.8,
-        ptm_threshold:      data.thresholds?.ptm      || 0.8,
-        min_ipae_threshold: data.thresholds?.min_ipae || 1.0,
-        thresholds:         data.thresholds || {},
+      { hotspots, n_designs: nDesigns, chain: data.chain,
+        max_resubmits:      maxResubmits,
+        target_passing:     num(adv.targetPass, 96),
+        iptm_threshold:     thresholds.iptm,
+        ptm_threshold:      thresholds.ptm,
+        min_ipae_threshold: thresholds.min_ipae,
+        thresholds,
       }
     );
     onSubmit(job.job_id);
@@ -2057,8 +2016,67 @@ function DifficultyPage({ data, onBack, onSubmit }) {
               ? 'BindCraft will generate 100 accepted designs by default — adjustable in Advanced settings'
               : 'n_designs will be determined automatically after a 100-design pilot run'}
           </p>
+                    <div style={{marginTop:14, display:'flex', alignItems:'center', gap:10}}>
+            <span className="field-label" style={{marginBottom:0}}>Max auto-resubmits</span>
+            <input className="input" type="number" min={0} max={50} step={1}
+                   style={{width:80}}
+                   value={maxResubmits}
+                   onChange={e => setResubOverride(Math.max(0, parseInt(e.target.value) || 0))} />
+          </div>
+          <div style={{color:'var(--grey-2)', fontSize:12, marginTop:6}}>
+            Recommended {recommendedResub} for a {grade.toLowerCase()} {targetType === 'protein' ? 'BindCraft' : 'RFD3'} target.
+            Timed-out stages resume automatically up to this limit (0 = off).
+          </div>
         </div>
       </div>
+
+      {/* Advanced options */}
+      <button className="advanced-toggle" onClick={() => setAdvOpen(!advOpen)}>
+        <span>{advOpen ? '▾' : '▸'}</span> Advanced options
+      </button>
+
+      {advOpen && (
+        <div className="advanced-panel">
+          <div className="advanced-grid">
+            <div className="field-group" style={{marginBottom:0}}>
+              <span className="field-label">Target passing designs</span>
+              <input className="input" type="number" value={adv.targetPass}
+                     onChange={e => setAdvField('targetPass', e.target.value)} />
+              <div className="hint">Used to recommend n_designs (default: 96 = one plate)</div>
+            </div>
+            {targetType === 'small_molecule' && (
+              <div className="field-group" style={{marginBottom:0}}>
+                <span className="field-label">Override n_designs</span>
+                <input className="input" type="number" placeholder="Auto (pilot-based)"
+                       value={adv.nDesigns}
+                       onChange={e => setAdvField('nDesigns', e.target.value)} />
+              </div>
+            )}
+          </div>
+          <div style={{marginTop:16, marginBottom:8}}>
+            <span className="field-label">Metric thresholds</span>
+          </div>
+          <div className="advanced-grid">
+            {[
+              ['ipTM threshold',         'iptm',                   0,    1,   0.01],
+              ['pTM threshold',          'ptm',                    0,    1,   0.01],
+              ['pLDDT threshold',        'plddt',                  0,    1,   0.01],
+              ['min ipAE threshold',     'min_ipae',               0,    5,   0.1],
+              ['RMSD threshold (Å)',     'rmsd',                   0,    10,  0.1],
+              ['ΔG threshold',           'dg',                     -200, 0,   1],
+              ['Max unsat H-bonds',      'delta_unsat_hbonds',     0,    10,  1],
+              ['Max surface hydrophob',  'surface_hydrophobicity', 0,    1,   0.01],
+            ].map(([label, key, min, max, step]) => (
+              <div key={key} className="field-group" style={{marginBottom:0}}>
+                <span className="field-label">{label}</span>
+                <input className="input" type="number" min={min} max={max} step={step}
+                       value={adv[key]}
+                       onChange={e => setAdvField(key, e.target.value)} />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Factors */}
       {difficulty.factors && Object.keys(difficulty.factors).length > 0 && (
@@ -2410,6 +2428,21 @@ function StatusPage({ jobId, onResults, onNewJob }) {
   const [stages,     setStages]     = useState([]);
   const [cancelling, setCancelling] = useState(false);
   const [cancelConfirm, setCancelConfirm] = useState(false);
+  const [extending,   setExtending]   = useState(false);
+  const [customExtra, setCustomExtra] = useState(5);
+
+  async function handleExtend(n) {
+    if (!n || n < 1) return;
+    setExtending(true);
+    try {
+      await API.extendResubmits(jobId, n);
+      const j = await API.getJob(jobId);
+      setJob(j);
+      setStages(j.stages || []);
+    } finally {
+      setExtending(false);
+    }
+  }
 
   async function handleCancel() {
     setCancelling(true);
@@ -2509,6 +2542,38 @@ function StatusPage({ jobId, onResults, onNewJob }) {
           ))}
         </div>
       </div>
+      {job.resubmit_info?.exhausted_stages?.length > 0 && (
+        <div style={{border:'1px solid var(--amber)', borderRadius:8,
+                     padding:'14px 16px', marginBottom:20}}>
+          <div style={{fontSize:13, color:'var(--white)', marginBottom:6}}>
+            Auto-resubmit limit reached ({job.resubmit_info.max}) for{' '}
+            {job.resubmit_info.exhausted_stages
+              .map(s => (STAGE_LABELS[s] || s).replace('\n', ' ')).join(', ')}.
+          </div>
+          <div style={{fontSize:12, color:'var(--grey-2)', marginBottom:10}}>
+            The stage timed out again. Add more resubmits to resume it from where it left off.
+          </div>
+          <div style={{display:'flex', gap:8, alignItems:'center', flexWrap:'wrap'}}>
+            {[5, 10].map(n => (
+              <button key={n} className="btn-secondary"
+                      style={{padding:'6px 12px', fontSize:12}}
+                      disabled={extending} onClick={() => handleExtend(n)}>
+                Add {n} more
+              </button>
+            ))}
+            <input className="input" type="number" min={1} max={50}
+                   style={{width:70}} value={customExtra}
+                   onChange={e => setCustomExtra(e.target.value)} />
+            <button className="btn-secondary"
+                    style={{padding:'6px 12px', fontSize:12}}
+                    disabled={extending}
+                    onClick={() => handleExtend(parseInt(customExtra) || 0)}>
+              Add custom
+            </button>
+          </div>
+        </div>
+      )}
+
 
       {/* Meta */}
       <div className="status-meta">
@@ -2529,6 +2594,14 @@ function StatusPage({ jobId, onResults, onNewJob }) {
             <div className="meta-item">
               <label>Difficulty</label>
               <div className="meta-value">{job.difficulty_grade} ({job.difficulty?.toFixed(0)})</div>
+            </div>
+          )}
+          {job.resubmit_info && (
+            <div className="meta-item">
+              <label>Auto-resubmits</label>
+              <div className="meta-value">
+                {Math.max(0, ...Object.values(job.resubmit_info.counts || {}))} / {job.resubmit_info.max}
+              </div>
             </div>
           )}
           {job.config?.n_designs && (

@@ -32,6 +32,7 @@ The final combined_ranked.csv and linker PDBs are at the top level.
 import argparse
 import csv
 import glob
+from html import parser
 import json
 import os
 import shutil
@@ -180,11 +181,22 @@ def run_ligandmpnn(rfd3_json_paths: list, output_dir: Path,
 # Stage 3: RF3 scoring
 # ---------------------------------------------------------------------------
 
-def run_rf3_scoring(mpnn_cif_paths: list, output_dir: Path) -> list:
+def run_rf3_scoring(mpnn_cif_paths: list, output_dir: Path,
+                    screen_top_frac: float = None) -> list:
     """
-    Run RF3 structure prediction on all MPNN outputs.
+    Run RF3 structure prediction on MPNN outputs.
     Extracts: ptm, iptm, ranking_score, plddt, has_clash, min_ipae.
     Returns list of result dicts.
+
+    Resumable: every design's outcome is appended to rf3_outputs/results.jsonl
+    as soon as it is scored; designs already recorded there (scored or
+    failed) are skipped on restart, so a job killed at the walltime limit
+    continues instead of starting over.
+
+    Screening (0 < screen_top_frac < 1): score only the first sequence of
+    each backbone, rank backbones by that design's ipTM, then score the
+    remaining sequences of the top fraction only. With screen_top_frac=None
+    every design is scored.
     """
     print(f"\n{'='*60}")
     print(f"[Stage 3] RF3 structure prediction ({len(mpnn_cif_paths)} designs)")
@@ -192,62 +204,142 @@ def run_rf3_scoring(mpnn_cif_paths: list, output_dir: Path) -> list:
 
     rf3_dir = output_dir / "rf3_outputs"
     rf3_dir.mkdir(exist_ok=True)
+    progress_path = rf3_dir / "results.jsonl"
 
-    from rf3.inference_engines.rf3 import RF3InferenceEngine
-    from rf3.utils.inference import InferenceInput
-    from atomworks.io.utils.io_utils import to_cif_file
-
-    engine = RF3InferenceEngine(ckpt_path="rf3", verbose=False)
-
-    results = []
-    for i, cif_path in enumerate(mpnn_cif_paths, 1):
+    def _design_name(cif_path):
         parent = Path(cif_path).parent.name
         fname  = Path(cif_path).stem.replace(".cif", "")
-        name   = f"{parent}_{fname}"
+        return f"{parent}_{fname}"
 
-        try:
-            inp     = InferenceInput.from_cif_path(cif_path, example_id=name)
-            outputs = engine.run(inputs=inp)
-            out     = outputs[name][0]
-            conf    = out.summary_confidences
+    # Outcomes from any previous run: name -> result dict (None = failed)
+    done = {}
+    if progress_path.exists():
+        with open(progress_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue   # truncated last line from a killed job
+                done[rec["name"]] = None if rec.get("failed") else rec
 
-            # Extract min ipAE from chain_pair_pae_min matrix
-            # Chain 0 = binder (A), Chain 1 = ligand (B)
-            chain_pair_pae_min = conf.get(
-                "chain_pair_pae_min", [[None, None], [None, None]]
-            )
-            min_ipae = None
-            if (chain_pair_pae_min and
-                    len(chain_pair_pae_min) > 0 and
-                    len(chain_pair_pae_min[0]) > 1 and
-                    chain_pair_pae_min[0][1] is not None):
-                min_ipae = round(float(chain_pair_pae_min[0][1]), 4)
+    _state = {}
 
-            result = {
-                "name":          name,
-                "cif_path":      cif_path,
-                "ptm":           round(float(conf["ptm"]), 4),
-                "iptm":          round(float(conf["iptm"]), 4),
-                "ranking_score": round(float(conf["ranking_score"]), 4),
-                "plddt":         round(float(conf["overall_plddt"]), 4),
-                "has_clash":     bool(conf["has_clash"]),
-                "min_ipae":      min_ipae,
-            }
-            results.append(result)
+    def _get_engine():
+        if "engine" not in _state:
+            from rf3.inference_engines.rf3 import RF3InferenceEngine
+            from rf3.utils.inference import InferenceInput
+            from atomworks.io.utils.io_utils import to_cif_file  # noqa: F401
+            _state["engine"] = RF3InferenceEngine(ckpt_path="rf3", verbose=False)
+            _state["InferenceInput"] = InferenceInput
+        return _state["engine"], _state["InferenceInput"]
 
-            if i % 100 == 0 or i == len(mpnn_cif_paths):
-                print(f"  [{i}/{len(mpnn_cif_paths)}] "
-                      f"{name}: ipTM={result['iptm']:.3f} "
-                      f"minpAE={min_ipae if min_ipae else 'N/A'}")
+    def _score_designs(paths, label):
+        todo = [p for p in paths if _design_name(p) not in done]
+        print(f"  [{label}] {len(paths) - len(todo)} already processed, "
+              f"{len(todo)} to score", flush=True)
+        if not todo:
+            return
+        engine, InferenceInput = _get_engine()
 
-        except Exception as e:
-            print(f"  [WARN] RF3 failed for {name}: {e}")
+        with open(progress_path, "a") as pf:
+            for k, cif_path in enumerate(todo, 1):
+                name = _design_name(cif_path)
+                try:
+                    inp     = InferenceInput.from_cif_path(cif_path, example_id=name)
+                    outputs = engine.run(inputs=inp)
+                    out     = outputs[name][0]
+                    conf    = out.summary_confidences
 
-    # Save RF3 results
+                    # Extract min ipAE from chain_pair_pae_min matrix
+                    # Chain 0 = binder (A), Chain 1 = ligand (B)
+                    chain_pair_pae_min = conf.get(
+                        "chain_pair_pae_min", [[None, None], [None, None]]
+                    )
+                    min_ipae = None
+                    if (chain_pair_pae_min and
+                            len(chain_pair_pae_min) > 0 and
+                            len(chain_pair_pae_min[0]) > 1 and
+                            chain_pair_pae_min[0][1] is not None):
+                        min_ipae = round(float(chain_pair_pae_min[0][1]), 4)
+
+                    rec = {
+                        "name":          name,
+                        "cif_path":      cif_path,
+                        "ptm":           round(float(conf["ptm"]), 4),
+                        "iptm":          round(float(conf["iptm"]), 4),
+                        "ranking_score": round(float(conf["ranking_score"]), 4),
+                        "plddt":         round(float(conf["overall_plddt"]), 4),
+                        "has_clash":     bool(conf["has_clash"]),
+                        "min_ipae":      min_ipae,
+                    }
+                except Exception as e:
+                    print(f"  [WARN] RF3 failed for {name}: {e}", flush=True)
+                    rec = {"name": name, "failed": True, "error": str(e)[:200]}
+
+                pf.write(json.dumps(rec) + "\n")
+                pf.flush()
+                done[name] = None if rec.get("failed") else rec
+
+                if k % 100 == 0 or k == len(todo):
+                    if rec.get("failed"):
+                        print(f"  [{label} {k}/{len(todo)}] {name}: failed", flush=True)
+                    else:
+                        print(f"  [{label} {k}/{len(todo)}] {name}: "
+                              f"ipTM={rec['iptm']:.3f} "
+                              f"minpAE={rec['min_ipae'] if rec['min_ipae'] else 'N/A'}",
+                              flush=True)
+
+    # Group designs by backbone (one directory of sequences per backbone)
+    by_backbone = {}
+    for p in sorted(mpnn_cif_paths):
+        by_backbone.setdefault(Path(p).parent.name, []).append(p)
+
+    use_screening = bool(
+        screen_top_frac is not None
+        and 0 < screen_top_frac < 1
+        and by_backbone
+        and max(len(v) for v in by_backbone.values()) > 1
+    )
+    if screen_top_frac is not None and not use_screening:
+        print("  [WARN] screening requested but not applicable (invalid fraction "
+              "or one sequence per backbone) - scoring all designs", flush=True)
+
+    if use_screening:
+        screen_paths = [v[0] for v in by_backbone.values()]
+        print(f"  Screening: 1 sequence for each of {len(by_backbone)} backbones",
+              flush=True)
+        _score_designs(screen_paths, "screen")
+
+        ranked = []
+        for bb, paths in by_backbone.items():
+            rec = done.get(_design_name(paths[0]))
+            if rec:
+                ranked.append((rec["iptm"], bb))
+        ranked.sort(key=lambda t: (-t[0], t[1]))   # deterministic on restart
+
+        n_promote = max(1, int(round(len(by_backbone) * screen_top_frac)))
+        promoted  = [bb for _, bb in ranked[:n_promote]]
+        remaining = [p for bb in promoted for p in by_backbone[bb][1:]]
+        print(f"  Promoting top {len(promoted)} of {len(by_backbone)} backbones "
+              f"({screen_top_frac:.0%} by ipTM): {len(remaining)} more designs "
+              f"to score", flush=True)
+        _score_designs(remaining, "promoted")
+    else:
+        _score_designs(list(mpnn_cif_paths), "all")
+
+    names     = [_design_name(p) for p in mpnn_cif_paths]
+    results   = [done[n] for n in names if done.get(n)]
+    n_failed  = sum(1 for n in names if n in done and done[n] is None)
+    n_skipped = sum(1 for n in names if n not in done)
+
     json_path = rf3_dir / "all_results.json"
     with open(json_path, "w") as f:
         json.dump(results, f, indent=2)
-    print(f"  RF3 results saved: {json_path}")
+    print(f"  RF3 results saved: {json_path} "
+          f"({len(results)} scored, {n_failed} failed, {n_skipped} not scored)")
 
     return results
 
@@ -266,7 +358,12 @@ RF3_HARD_FILTERS = {
 RMSD_THRESHOLD = 2.5
 
 
-def apply_rf3_filters(results: list, rfd3_json_dir: Path) -> tuple[list, list]:
+def apply_rf3_filters(results: list, rfd3_json_dir: Path,
+                      iptm_thresh: float = 0.8,
+                      ptm_thresh: float = 0.8,
+                      plddt_thresh: float = 0.0,
+                      min_ipae_thresh: float = 999.0,
+                      rmsd_thresh: float = 2.5) -> tuple[list, list]:
     """
     Apply hard filters to RF3 results.
     Also loads RMSD from RFD3 JSON files.
@@ -294,10 +391,15 @@ def apply_rf3_filters(results: list, rfd3_json_dir: Path) -> tuple[list, list]:
         fail_reason = ""
 
         # RF3 metric filters
-        if r["iptm"] < 0.8:
-            fail_reason = f"ipTM={r['iptm']:.3f} < 0.8"
-        elif r["ptm"] < 0.8:
-            fail_reason = f"pTM={r['ptm']:.3f} < 0.8"
+        if r["iptm"] < iptm_thresh:
+            fail_reason = f"ipTM={r['iptm']:.3f} < {iptm_thresh}"
+        elif r["ptm"] < ptm_thresh:
+            fail_reason = f"pTM={r['ptm']:.3f} < {ptm_thresh}"
+        elif r["plddt"] < plddt_thresh:
+            fail_reason = f"pLDDT={r['plddt']:.3f} < {plddt_thresh}"
+        elif (r.get("min_ipae") is not None
+              and r["min_ipae"] > min_ipae_thresh):
+            fail_reason = f"min ipAE={r['min_ipae']:.3f} > {min_ipae_thresh}"
         elif r["has_clash"]:
             fail_reason = "has_clash=True"
         else:
@@ -305,8 +407,8 @@ def apply_rf3_filters(results: list, rfd3_json_dir: Path) -> tuple[list, list]:
             bb_name = "_".join(r["name"].split("_")[:-2])  # strip mpnn suffix
             rmsd = rmsd_map.get(bb_name)
             r["rmsd"] = round(rmsd, 4) if rmsd else None
-            if rmsd and rmsd > RMSD_THRESHOLD:
-                fail_reason = f"RMSD={rmsd:.3f} > {RMSD_THRESHOLD}"
+            if rmsd and rmsd > rmsd_thresh:
+                fail_reason = f"RMSD={rmsd:.3f} > {rmsd_thresh}"
 
         r["passes_rf3"] = fail_reason == ""
         r["rf3_fail_reason"] = fail_reason
@@ -489,6 +591,40 @@ OUTPUT_FIELDS = [
     "passes_rf3", "rf3_fail_reason", "cif_path",
 ]
 
+def apply_rosetta_filters(survivors: list, failing: list,
+                          dg_thresh: float = 1e9,
+                          unsat_thresh: float = 999.0,
+                          hydrophob_thresh: float = 999.0) -> tuple[list, list]:
+    """
+    Filter designs on Rosetta metrics (dG, unsatisfied H-bonds, surface
+    hydrophobicity). A missing metric is never treated as a failure.
+    Failing designs are appended to `failing` with a reason.
+    """
+    print(f"\n{'='*60}")
+    print(f"[Stage 7b] Applying Rosetta filters to {len(survivors)} designs")
+    print(f"{'='*60}")
+
+    passing = []
+    for r in survivors:
+        reason = ""
+        dg    = r.get("dG")
+        unsat = r.get("delta_unsat_hbonds")
+        hyd   = r.get("surface_hydrophobicity")
+        if dg is not None and dg > dg_thresh:
+            reason = f"Rosetta: dG={dg:.1f} > {dg_thresh}"
+        elif unsat is not None and unsat > unsat_thresh:
+            reason = f"Rosetta: unsat H-bonds={unsat} > {unsat_thresh}"
+        elif hyd is not None and hyd > hydrophob_thresh:
+            reason = f"Rosetta: surface hydrophobicity={hyd:.3f} > {hydrophob_thresh}"
+
+        if reason:
+            r["rf3_fail_reason"] = reason
+            failing.append(r)
+        else:
+            passing.append(r)
+
+    print(f"  {len(passing)}/{len(survivors)} designs pass Rosetta filters.")
+    return passing, failing
 
 def rank_and_write(survivors: list, failing: list,
                     output_dir: Path) -> list:
@@ -656,6 +792,17 @@ def main():
                         help="Symplify job ID (for DB write)")
     parser.add_argument("--db_path", default="", 
                         help="Path to symplify.db (for DB write)")
+    parser.add_argument("--screen_top_frac", type=float, default=None,
+                        help="Score 1 sequence per backbone, then the rest only "
+                             "for the top fraction of backbones by ipTM")
+    parser.add_argument("--iptm_threshold", type=float, default=0.8)
+    parser.add_argument("--ptm_threshold", type=float, default=0.8)
+    parser.add_argument("--plddt_threshold",    type=float, default=0.0)
+    parser.add_argument("--min_ipae_threshold", type=float, default=999.0)
+    parser.add_argument("--rmsd_threshold",     type=float, default=2.5)
+    parser.add_argument("--dg_threshold",           type=float, default=1e9)
+    parser.add_argument("--unsat_hbonds_threshold", type=float, default=999.0)
+    parser.add_argument("--hydrophob_threshold",    type=float, default=999.0)
     args = parser.parse_args()
 
     t_start    = time.time()
@@ -686,7 +833,8 @@ def main():
 
     # Stage 3: RF3 scoring
     if not args.skip_rf3:
-        rf3_results = run_rf3_scoring(mpnn_cifs, output_dir)
+        rf3_results = run_rf3_scoring(mpnn_cifs, output_dir, screen_top_frac=args.screen_top_frac)
+    
     else:
         print("\n[Stage 3] Skipping RF3 (loading existing all_results.json)")
         with open(output_dir / "rf3_outputs" / "all_results.json") as f:
@@ -698,7 +846,12 @@ def main():
 
     # Stage 4: Hard filter
     survivors, failing = apply_rf3_filters(
-        rf3_results, output_dir / "rfd3_outputs"
+        rf3_results, output_dir / "rfd3_outputs",
+        iptm_thresh=args.iptm_threshold,
+        ptm_thresh=args.ptm_threshold,
+        plddt_thresh=args.plddt_threshold,
+        min_ipae_thresh=args.min_ipae_threshold,
+        rmsd_thresh=args.rmsd_threshold,
     )
 
     # Stage 5: CIF → PDB
@@ -717,13 +870,23 @@ def main():
     # Stage 7: Rosetta
     survivors = run_rosetta_stage(survivors, name_to_pdb, output_dir)
 
+    survivors, failing = apply_rosetta_filters(
+        survivors, failing,
+        dg_thresh=args.dg_threshold,
+        unsat_thresh=args.unsat_hbonds_threshold,
+        hydrophob_thresh=args.hydrophob_threshold,
+    )
+
     # Stage 8: Rank + CSV
     ranked = rank_and_write(survivors, failing, output_dir)
     for r in ranked:
         r["pdb_path"] = name_to_pdb.get(r["name"])
 
-    # Stage 9: Linker
-    append_linkers(ranked, name_to_pdb, output_dir, args.linker_repeats)
+    # Stage 9: Linker (0 = skip; the user appends it from the results page)
+    if args.linker_repeats > 0:
+        append_linkers(ranked, name_to_pdb, output_dir, args.linker_repeats)
+    else:
+        print("\n[Stage 9] Skipping linker (applied later from the results page)")
 
     if args.job_id and args.db_path and Path(args.db_path).exists():
         _save_results_to_db(args.db_path, args.job_id, ranked)

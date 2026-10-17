@@ -33,6 +33,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import db
+import auto_resubmit
 from difficulty_scorer import score_protein, score_small_molecule
 from hotspot_finder import find_protein_hotspots, find_small_molecule_features
 from pipeline_router import PipelineRouter
@@ -45,6 +46,23 @@ SYMPLIFY_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR   = SYMPLIFY_DIR / "frontend" / "dist"
 UPLOAD_DIR   = SYMPLIFY_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
+
+def _keep_first_model(path):
+    """Trim multi-model PDB files (NMR ensembles) to model 1, in place."""
+    p = Path(path)
+    if p.suffix.lower() != ".pdb" or not p.exists():
+        return
+    lines = p.read_text().splitlines(keepends=True)
+    if sum(1 for l in lines if l.startswith("MODEL")) <= 1:
+        return
+    kept = []
+    for l in lines:
+        kept.append(l)
+        if l.startswith("ENDMDL"):
+            break
+    kept.append("END\n")
+    p.write_text("".join(kept))
+    print(f"[upload] {p.name}: multi-model file trimmed to model 1", flush=True)
 
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
 
@@ -103,6 +121,7 @@ def create_job():
         filename    = secure_filename(f.filename)
         file_path   = str(UPLOAD_DIR / filename)
         f.save(file_path)
+        _keep_first_model(file_path)
 
     target_type = request.form.get("target_type", "protein")
     name        = request.form.get("name", filename)
@@ -136,6 +155,67 @@ def list_jobs():
     jobs = db.list_jobs()
     return jsonify(jobs)
 
+_poll_lock = threading.Lock()
+MAX_RESUBMITS = auto_resubmit.DEFAULT_MAX_RESUBMITS
+POLL_INTERVAL_SECONDS = 300
+
+def _job_max_resubmits(job):
+    try:
+        return max(0, int((job.get("config") or {}).get("max_resubmits", MAX_RESUBMITS)))
+    except (TypeError, ValueError):
+        return MAX_RESUBMITS
+
+def _poll_job_stages(job_id):
+    """
+    Sync stage statuses with the scheduler and resubmit timed-out stages.
+    Shared by the GET endpoint and the background poller; the lock keeps
+    them from both resubmitting the same timeout.
+    """
+    with _poll_lock:
+        auto_resubmit.ensure_watchdogs(router, job_id)
+        stages = db.get_stages(job_id)
+        job           = db.get_job(job_id) or {}
+        max_resubmits = _job_max_resubmits(job)
+        for stage in stages:
+            if not stage.get("scheduler_id") or stage["status"] in ("completed", "failed", "cancelled"):
+                continue
+            name = stage["stage_name"]
+            live = router.scheduler.status(stage["scheduler_id"])
+
+            if live.state == "RUNNING" and stage["status"] != "running":
+                db.update_stage(job_id, name, "running")
+            elif live.state == "COMPLETED":
+                print(f"[poll] {job_id[:8]} {name}: completed", flush=True)
+                db.update_stage(job_id, name, "completed")
+            elif live.state == "FAILED":
+                print(f"[poll] {job_id[:8]} {name}: failed", flush=True)
+                db.update_stage(job_id, name, "failed")
+            elif live.state == "TIMEOUT":
+                outcome = auto_resubmit.handle_timeout(router, job_id, name, stage["scheduler_id"])
+                if outcome == "resubmitted":
+                    break   # downstream stages were rewritten; re-poll them next cycle
+        return db.get_stages(job_id)
+
+
+def _background_poller():
+    time.sleep(30)   # let the app finish starting
+    while True:
+        try:
+            for job in db.list_jobs():
+                if job.get("status") in ("completed", "failed", "cancelled"):
+                    continue
+                try:
+                    _poll_job_stages(job["id"])
+                except Exception as e:
+                    print(f"[poller] error polling {job['id'][:8]}: {e}", flush=True)
+        except Exception as e:
+            print(f"[poller] loop error: {e}", flush=True)
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+
+threading.Thread(target=_background_poller, daemon=True).start()
+print("[poller] background poller started", flush=True)
+
 
 @app.route("/api/jobs/<job_id>", methods=["GET"])
 def get_job(job_id):
@@ -143,36 +223,18 @@ def get_job(job_id):
     if not job:
         return jsonify({"error": "Job not found"}), 404
 
-    stages = db.get_stages(job_id)
+    stages = _poll_job_stages(job_id)
 
-    # Poll scheduler for live stage updates for any stage with a scheduler ID
-    for stage in stages:
-        if stage.get("scheduler_id") and stage["status"] not in ("completed", "failed", "cancelled"):
-            live = router.scheduler.status(stage["scheduler_id"])
-            mapped = live.state.lower()
-            # Map SLURM states to our states
-            if live.state == "RUNNING" and stage["status"] != "running":
-                db.update_stage(job_id, stage["stage_name"], "running")
-                stage["status"] = "running"
-            elif live.state == "COMPLETED" and stage["status"] != "completed":
-                db.update_stage(job_id, stage["stage_name"], "completed")
-                stage["status"] = "completed"
-            elif live.state == "FAILED" and stage["status"] != "failed":
-                db.update_stage(job_id, stage["stage_name"], "failed")
-                stage["status"] = "failed"
-            elif live.state == "TIMEOUT" and stage["status"] != "timeout_resubmitted":
-                print(f"[app] Stage {stage['stage_name']} for job {job_id} timed out — resubmitting", flush=True)
-                try:
-                    new_jid = router.resubmit_stage(job_id, stage["stage_name"])
-                    db.update_stage(job_id, stage["stage_name"], "running", scheduler_id=str(new_jid))
-                    stage["status"] = "running"
-                except Exception as e:
-                    print(f"[app] ERROR resubmitting {stage['stage_name']} for job {job_id}: {e}", flush=True)
-                    db.update_stage(job_id, stage["stage_name"], "timeout_resubmitted")
-                    stage["status"] = "timeout_resubmitted"
-            elif live.state == "PENDING" and stage["status"] not in ("pending", "running"):
-                db.update_stage(job_id, stage["stage_name"], "pending")
-                stage["status"] = "pending"
+    max_resubmits = _job_max_resubmits(job)
+    counts        = {s["stage_name"]: db.get_resubmit_count(job_id, s["stage_name"]) for s in stages}
+    exhausted     = [
+        s["stage_name"] for s in stages
+        if s["status"] == "failed" and s.get("scheduler_id")
+        and counts[s["stage_name"]] >= max_resubmits
+        and router.scheduler.status(s["scheduler_id"]).state == "TIMEOUT"
+    ]
+    job["resubmit_info"] = {"max": max_resubmits, "counts": counts,
+                            "exhausted_stages": exhausted}
 
     job["stages"] = stages
     if job.get("difficulty_report") and isinstance(job["difficulty_report"], str):
@@ -347,6 +409,45 @@ def confirm_job(job_id):
 
     return jsonify({"status": "full_run_submitted", "n_designs": n_designs})
 
+@app.route("/api/jobs/<job_id>/extend-resubmits", methods=["POST"])
+def extend_resubmits(job_id):
+    """
+    Raise the auto-resubmit limit for a job whose stage(s) hit it, and
+    resume the timed-out stage(s) immediately.
+    Body: {"additional": 5}
+    """
+    job = db.get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+
+    body = request.get_json() or {}
+    try:
+        additional = int(body.get("additional", 5))
+    except (TypeError, ValueError):
+        return jsonify({"error": "additional must be an integer"}), 400
+    if additional < 1 or additional > 50:
+        return jsonify({"error": "additional must be between 1 and 50"}), 400
+
+    with _poll_lock:
+        max_now = _job_max_resubmits(job)
+        revive  = [
+            s for s in db.get_stages(job_id)
+            if s["status"] == "failed" and s.get("scheduler_id")
+            and db.get_resubmit_count(job_id, s["stage_name"]) >= max_now
+            and router.scheduler.status(s["scheduler_id"]).state == "TIMEOUT"
+        ]
+        if not revive:
+            return jsonify({"error": "No stage is waiting on the resubmit limit"}), 400
+
+        base    = max(db.get_resubmit_count(job_id, s["stage_name"]) for s in revive)
+        new_max = base + additional
+        db.update_job_config_key(job_id, "max_resubmits", new_max)
+        for s in revive:
+            db.update_stage(job_id, s["stage_name"], "running")
+
+    _poll_job_stages(job_id)   # outside the lock block: resubmit now, not at the next cycle
+    return jsonify({"max_resubmits": new_max,
+                    "resumed_stages": [s["stage_name"] for s in revive]})
 
 # ---------------------------------------------------------------------------
 # API: Pre-flight scoring
@@ -376,6 +477,7 @@ def analyze_structure():
     filename = secure_filename(f.filename)
     tmp_path = UPLOAD_DIR / filename
     f.save(str(tmp_path))
+    _keep_first_model(tmp_path)
 
     try:
         result = _analyze_structure(str(tmp_path))
@@ -519,11 +621,15 @@ def _analyze_structure(pdb_path: str) -> dict:
                 "description": f"Chain {chain_id} — {resname} (small molecule)",
             })
         elif hetatm_res and n_aa >= 1:
+            # Fewer than 3 standard residue types plus non-standard groups:
+            # a modified peptide or macrocycle, not a protein.
+            n_res = len(atom_res) + len(hetatm_res)
             chain_info.append({
                 "id":          chain_id,
-                "type":        "protein",
-                "n_residues":  len(atom_res) + len(hetatm_res),
-                "description": f"Chain {chain_id} — protein with ligand",
+                "type":        "small_molecule",
+                "resname":     sorted(hetatm_res)[0],
+                "n_residues":  n_res,
+                "description": f"Chain {chain_id} — modified peptide / macrocycle ({n_res} residue types)",
             })
 
     if not chain_info:
@@ -551,6 +657,7 @@ def score_difficulty():
     filename    = secure_filename(f.filename)
     tmp_path    = UPLOAD_DIR / f"tmp_{filename}"
     f.save(str(tmp_path))
+    _keep_first_model(tmp_path)
 
     try:
         if target_type == "protein":
@@ -607,6 +714,7 @@ def fetch_pdb(pdb_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 502
 
+    _keep_first_model(out_path)
     try:
         analysis = _analyze_structure(str(out_path))
         # For CCD ligand CIFs, force type to small_molecule
@@ -774,6 +882,7 @@ def find_hotspots():
         filename    = secure_filename(f.filename)
         tmp_path    = UPLOAD_DIR / f"tmp_{filename}"
         f.save(str(tmp_path))
+        _keep_first_model(tmp_path)
         use_path    = str(tmp_path)
     else:
         return jsonify({"error": "No file uploaded"}), 400
