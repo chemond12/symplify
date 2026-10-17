@@ -128,20 +128,37 @@ def score_protein(pdb_path: str, hotspot_residues: Optional[list] = None,
         "unit": "residues", "note": f"{n_residues} residues",
     }
 
-    # Factor 2: Flexibility (mean B-factor)
-    bfactors = [atom.bfactor for res in residues for atom in res]
-    mean_bfactor = float(sum(bfactors) / len(bfactors)) if bfactors else 20.0
-    if mean_bfactor > 50:
-        flex_score = 75
-        warnings.append("High B-factors suggest target flexibility — may reduce prediction confidence")
-    elif mean_bfactor > 30:
-        flex_score = 40
-    else:
-        flex_score = 15
-    factors["flexibility"] = {
-        "score": flex_score, "value": round(mean_bfactor, 1),
-        "unit": "mean B-factor (Å²)", "note": f"Mean B-factor: {mean_bfactor:.1f} Å²",
-    }
+    # Factor 2: Flexibility. Experimental structures: mean B-factor (high = mobile).
+    # Predicted structures (AlphaFold, ColabFold, ESMFold, Boltz...) store pLDDT
+    # in the B-factor column, where HIGH = CONFIDENT, so the logic must flip.
+    mean_b, kind = _confidence_signal(pdb_path, residues)
+    if kind == "plddt":
+        if mean_b >= 90:
+            flex_score = 15
+        elif mean_b >= 70:
+            flex_score = 40
+        else:
+            flex_score = 75
+            warnings.append("Low mean pLDDT — predicted structure is low-confidence, so the fold (and the epitope) may be wrong")
+        factors["flexibility"] = {
+            "score": flex_score, "value": round(mean_b, 1),
+            "unit": "mean pLDDT (predicted model)",
+            "note": f"Predicted structure — mean pLDDT {mean_b:.1f}",
+        }
+    elif kind == "bfactor":
+        if mean_b > 50:
+            flex_score = 75
+            warnings.append("High B-factors suggest target flexibility — may reduce prediction confidence")
+        elif mean_b > 30:
+            flex_score = 40
+        else:
+            flex_score = 15
+        factors["flexibility"] = {
+            "score": flex_score, "value": round(mean_b, 1),
+            "unit": "mean B-factor (Å²)", "note": f"Mean B-factor: {mean_b:.1f} Å²",
+        }
+    # kind == "none": B-factors carry no information (all zero / constant), so the
+    # factor is omitted and the remaining weights renormalize.
 
     # Factor 3: Globularity — compact globular folds are easier; extended or
     # disordered chains are much harder (Science 2024, IDR binders). Rg vs the
@@ -432,6 +449,52 @@ def _load_molecule(path: str):
             return None
     except Exception:
         return None
+
+
+_PREDICTOR_KEYWORDS = ("ALPHAFOLD", "COLABFOLD", "ESMFOLD", "ROSETTAFOLD", "OPENFOLD",
+                       "BOLTZ", "CHAI-1", "CHAI_1", "THEORETICAL MODEL", "ESM METAGENOMIC")
+
+
+def _confidence_signal(pdb_path: str, residues):
+    """
+    Decide what the B-factor column means. Returns (mean_value, kind) with kind:
+      "plddt"   predicted structure; value is mean pLDDT on a 0-100 scale
+      "bfactor" experimental structure; value is the mean B-factor
+      "none"    B-factors are uninformative (constant / all zero)
+
+    Predicted if EITHER the file header names a predictor, OR every residue has
+    one uniform B-factor across all its atoms (a per-residue score — real
+    refinement gives each atom its own B) with values inside 0-100.
+    """
+    import numpy as np
+    try:
+        with open(pdb_path, errors="ignore") as fh:
+            header = "".join(next(fh, "") for _ in range(300)).upper()
+    except OSError:
+        header = ""
+    named = any(k in header for k in _PREDICTOR_KEYWORDS)
+
+    per_res, uniform = [], 0
+    for res in residues:
+        bs = [a.bfactor for a in res]
+        if not bs:
+            continue
+        per_res.append(float(np.mean(bs)))
+        if max(bs) - min(bs) < 1e-3:
+            uniform += 1
+    if not per_res:
+        return 20.0, "bfactor"
+    arr = np.array(per_res)
+    all_atoms = [a.bfactor for res in residues for a in res]
+    if np.ptp(all_atoms) < 1e-3:                    # constant everywhere (e.g. all 0.00)
+        return float(arr.mean()), "none"
+
+    mostly_uniform = uniform / len(per_res) >= 0.95
+    in_range = arr.min() >= 0.0 and arr.max() <= 100.0
+    if named or (mostly_uniform and in_range):
+        scale = 100.0 if arr.max() <= 1.0 else 1.0   # some tools write pLDDT as 0-1
+        return float(arr.mean() * scale), "plddt"
+    return float(np.mean(all_atoms)), "bfactor"
 
 
 def _chain_residue_areas(pdb_path: str, chain: Optional[str]):
