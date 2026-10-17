@@ -316,6 +316,33 @@ def score_small_molecule(structure_path: str) -> DifficultyReport:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _smiles_from_ccd(content: str):
+    """
+    Pull a SMILES string out of a CCD-style CIF. Descriptor rows look like
+        7V7 SMILES_CANONICAL CACTVS 3.370 "CC(=O)Nc1ccc(O)cc1"
+        HCY SMILES           ACDLabs 10.04 O=C(O)C(N)CCS
+    The value is quoted only when it contains special characters, so both the
+    quoted and the bare form must be handled. Preference order:
+    CACTVS canonical > other canonical > any SMILES row.
+    """
+    import re
+    row = re.compile(r"""^\S+\s+(SMILES\w*)\s+(\S+)\s+\S+\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*$""")
+    found = []
+    for line in content.split('\n'):
+        m = row.match(line.strip())
+        if m:
+            kind, prog = m.group(1), m.group(2)
+            val = m.group(3) or m.group(4) or m.group(5)
+            found.append((kind, prog, val))
+    for want in (lambda k, p: k == "SMILES_CANONICAL" and "CACTVS" in p,
+                 lambda k, p: k == "SMILES_CANONICAL",
+                 lambda k, p: True):
+        for k, p, v in found:
+            if want(k, p) and len(v) >= 2:
+                return v
+    return None
+
+
 def _load_molecule(path: str):
     """Try to load a molecule from PDB, CIF, SDF, or MOL2."""
     try:
@@ -353,30 +380,7 @@ def _load_molecule(path: str):
                 with open(path, errors='ignore') as f:
                     content = f.read()
 
-            # Parse CCD CIF SMILES lines — format is:
-            # COMPID  TYPE  PROGRAM  VERSION  "SMILES_STRING"
-            smiles = None
-            for line in content.split('\n'):
-                line = line.strip()
-                # Look for lines with SMILES_CANONICAL CACTVS first (most reliable)
-                if 'SMILES_CANONICAL' in line and 'CACTVS' in line:
-                    # Extract last quoted or unquoted token
-                    m = re.search(r'"([^"]{5,})"\\s*$', line)
-                    if not m:
-                        m = re.search(r'"([^"]{5,})"', line)
-                    if m:
-                        smiles = m.group(1)
-                        break
-
-            # Fallback: any SMILES line
-            if not smiles:
-                for line in content.split('\n'):
-                    line = line.strip()
-                    if 'SMILES' in line and not line.startswith('_'):
-                        m = re.search(r'"([A-Za-z0-9@\[\]()=#\+\-\./\\%]{5,})"', line)
-                        if m:
-                            smiles = m.group(1)
-                            break
+            smiles = _smiles_from_ccd(content)
 
             if smiles:
                 mol = Chem.MolFromSmiles(smiles)
