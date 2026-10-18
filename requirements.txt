@@ -1,0 +1,31 @@
+# Symplify — Python dependencies for the web app / backend environment
+# (the Flask server, difficulty scoring, and hotspot analysis).
+#
+#   pip install -r requirements.txt
+#
+# The design pipelines run in SEPARATE environments that are installed on
+# their own and are NOT covered by this file. See "Requirements" in the README:
+#   - BindCraft            (protein targets)
+#   - RFdiffusion3 / RF3   (small-molecule targets)
+#   - PeSTo                (automatic hotspot prediction)
+# Point Symplify at them with `environments:` and `paths:` in config.yaml.
+#
+# Lower bounds are the oldest versions we expect to work. Versions the app was
+# actually run with are listed at the bottom.
+
+# --- Needed to start the server (python run.py) ---
+flask>=3.1          # also installs werkzeug
+pyyaml>=6.0
+
+# --- Protein difficulty scoring and hotspot analysis ---
+numpy>=1.23
+biopython>=1.83     # Bio.PDB: structure parsing, chain selection
+freesasa>=2.2       # solvent-accessible surface area (epitope chemistry)
+
+# --- Small-molecule targets and CIF parsing ---
+rdkit>=2024.3       # SMILES / ligand handling, pharmacophore features
+biotite>=1.0        # reading CIF/PDBx files
+
+# Tested with (Python 3.14.6, Princeton Adroit cluster):
+#   Flask 3.1.3, Werkzeug 3.1.6, PyYAML 6.0.3, numpy 2.4.6, biopython 1.88,
+#   freesasa 2.2.1, rdkit 2026.9.1, biotite 2.0.0
