@@ -150,9 +150,23 @@ def create_job():
     return jsonify({"job_id": job_id, "status": "submitted"}), 201
 
 
+def _display_status(status, stages):
+    """Job badge: "queued" while a stage sits in the SLURM queue and nothing
+    has started running or finished yet; otherwise the stored job status."""
+    if status == "running":
+        sts = [s["status"] for s in stages]
+        if "queued" in sts and "running" not in sts and "completed" not in sts:
+            return "queued"
+    return status
+
+
 @app.route("/api/jobs", methods=["GET"])
 def list_jobs():
     jobs = db.list_jobs()
+    for j in jobs:
+        # uses stage rows already in the db (kept fresh by the poller), no SLURM calls
+        if j.get("status") == "running":
+            j["status"] = _display_status(j["status"], db.get_stages(j["id"]))
     return jsonify(jobs)
 
 _poll_lock = threading.Lock()
@@ -241,10 +255,7 @@ def get_job(job_id):
 
     job["stages"] = stages
     # Job-level badge: "queued" while nothing has actually started running
-    if job.get("status") == "running":
-        sts = [s["status"] for s in stages]
-        if "queued" in sts and "running" not in sts and "completed" not in sts:
-            job["status"] = "queued"
+    job["status"] = _display_status(job.get("status"), stages)
     if job.get("difficulty_report") and isinstance(job["difficulty_report"], str):
         try:
             job["difficulty_report"] = json.loads(job["difficulty_report"])
