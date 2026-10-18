@@ -1886,6 +1886,12 @@ function compactPatch(scores, coords, radius = 12, n = 5) {
   return near.slice(0, n);
 }
 
+// The n highest-scoring residues of a cluster. BindCraft works best with 3-5 hotspots,
+// but a PeSTo cluster can hold up to 10 residues.
+function topScoring(ids, scores, n = 5) {
+  return [...ids].sort((a, b) => ((scores || {})[b] ?? 0) - ((scores || {})[a] ?? 0)).slice(0, n);
+}
+
 function DifficultyPage({ data, onBack, onSubmit }) {
   const { targetType, file } = data;
   const [hotspots,   setHotspots]   = useState(data.hotspots || []);
@@ -2196,16 +2202,16 @@ function DifficultyPage({ data, onBack, onSubmit }) {
             Binding site clusters
             <span style={{marginLeft:8, fontWeight:400, textTransform:'none',
                           color:'var(--grey-2)', fontSize:11}}>
-              ranked by PESTO score × coverage
+              ranked by PESTO score × coverage · click to select its top 5
             </span>
           </div>
           {autoHots.details.clusters.map((cluster, i) => (
             <div key={cluster.cluster_id}
-                 onClick={() => setHotspots(cluster.residues)}
+                 onClick={() => setHotspots(topScoring(cluster.residues, autoHots.details.scores))}
                  style={{
-                   background: JSON.stringify(hotspots) === JSON.stringify(cluster.residues)
+                   background: (hotspots.length > 0 && hotspots.every(h => cluster.residues.includes(h)))
                      ? 'var(--teal-glow)' : 'var(--navy-mid)',
-                   border: '1px solid ' + (JSON.stringify(hotspots) === JSON.stringify(cluster.residues) ? 'var(--teal)' : 'var(--grey-3)'),
+                   border: '1px solid ' + ((hotspots.length > 0 && hotspots.every(h => cluster.residues.includes(h))) ? 'var(--teal)' : 'var(--grey-3)'),
                    borderRadius: 'var(--radius)',
                    padding: '14px 16px',
                    marginBottom: 8,
