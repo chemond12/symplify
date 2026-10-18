@@ -21,64 +21,163 @@ and C-terminus accessibility — with a GS linker attached, ready for phage disp
 
 ---
 
-## Quick start
+## Installation
 
-### 1. Install Symplify
+Symplify has two parts: the **web app** (a small Python server, installed with
+pip) and the **design tools** it launches on your cluster (BindCraft, PeSTo,
+RFdiffusion3), each in its own environment. Install the web app first, then the
+tools you need.
+
+### Requirements
+
+- A Linux cluster with SLURM, PBS or SGE (or a single machine, using `type: local`). Protein and small-molecule design need a GPU node.
+- `conda` (on many clusters: `module load anaconda3/...`) and Python 3.10 or newer for the web app. The web app was tested with Python 3.14.
+- SSH access to the cluster and a web browser on your own computer.
+
+| Component | Used for | How it is installed |
+|---|---|---|
+| Symplify web app | server, difficulty scoring, hotspot analysis | `pip install -r requirements.txt` (step 1) |
+| BindCraft | protein targets | its own conda environment, `BindCraft` (step 2) |
+| PeSTo | automatic hotspot prediction for proteins (optional: you can enter hotspots by hand) | its own conda environment, `pesto` (step 3) |
+| RFdiffusion3 | small-molecule targets (not needed for proteins) | its own conda environment, `rfd3` (step 4) |
+
+The tools are installed separately because their dependencies conflict with
+each other, so `requirements.txt` covers only the web app.
+
+### 1. Install the web app
 
 ```bash
 git clone https://github.com/chemond12/symplify
 cd symplify
-pip install -r requirements.txt
+pip install -r requirements.txt     # on a shared cluster, add --user
 ```
 
-### 1b. Install PESTO (for protein hotspot identification)
+### 2. Install BindCraft (protein targets)
+
+```bash
+git clone https://github.com/martinpacesa/BindCraft /path/to/BindCraft
+cd /path/to/BindCraft
+bash install_bindcraft.sh --cuda '12.4' --pkg_manager 'conda'
+```
+
+Use the CUDA version that matches your cluster and follow BindCraft's own README
+if its installer options differ. This creates a conda environment named
+`BindCraft`.
+
+### 3. Install PeSTo (optional, for automatic hotspot prediction)
 
 ```bash
 git clone https://github.com/LBM-EPFL/PeSTo.git /path/to/PeSTo
 
-# Create conda environment manually (pesto.yml has version conflicts on modern systems)
-conda create -n pesto python=3.9 -y
+# PeSTo's pesto.yml has version conflicts on modern systems, so build the environment by hand
+conda create -n pesto python=3.10 -y
 conda activate pesto
-conda install -c conda-forge h5py biopython tqdm -y
 
-# PyTorch CPU build avoids Intel MKL symbol conflicts on most clusters
-pip install torch==2.1.0+cpu torchvision==0.16.0+cpu \
-    --index-url https://download.pytorch.org/whl/cpu
+# numpy 1.23.5 matters: PeSTo uses the old np.object alias, which newer numpy removed
+pip install numpy==1.23.5 gemmi==0.7.5 networkx==3.4.2 sympy==1.14.0 \
+    jinja2 filelock fsspec packaging typing_extensions mpmath
 
-# Pin numpy for PyTorch 2.1 compatibility
-pip install "numpy<2.0" --force-reinstall
+# CPU build of PyTorch (Symplify runs PeSTo on the CPU)
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-# Older gemmi compatible with system libstdc++ on most HPC clusters
-pip install gemmi==0.5.8
-
-# Patch deprecated numpy alias in PESTO source
-sed -i 's/np\.object\b/object/g' \
-    /path/to/PeSTo/model/save/i_v4_1_2021-09-07_11-21/src/structure.py
+# scikit-learn groups the hotspots into the "binding site clusters" shown in the UI.
+# Without it that list is empty. Keeping numpy pinned in the same command stops
+# pip from upgrading it and breaking PeSTo.
+pip install "scikit-learn<1.6" "numpy==1.23.5"
 ```
 
-Then set `paths.pesto_dir: /path/to/PeSTo` and `environments.pesto: pesto` in `config.yaml`.
+PeSTo's trained model weights are part of its repository (`model/save/`), so no
+separate download is needed.
 
-### 2. Configure
+### 4. Install RFdiffusion3 (small-molecule targets only)
+
+<!-- TODO: add the installation steps for the rfd3 environment (RFdiffusion3, RF3,
+     foundry, LigandMPNN, atomworks) and the weights/CCD mirror locations. -->
+Setup instructions for the `rfd3` environment are still being written. Protein
+targets do not need it.
+
+### 5. Configure
 
 ```bash
 cp config.yaml.example config.yaml
-# Edit config.yaml — set your paths, environments, and scheduler type
-python run.py --check   # validate configuration
+# Edit config.yaml: set your workspace, tool paths, conda environment names and scheduler
+python backend/setup_wizard.py          # interactive: sets the SLURM partition/account
+python backend/setup_wizard.py --check  # validates paths, environments and SLURM
 ```
 
-### 3. Run
+A healthy check looks like this (warnings for tools you did not install, such as
+`rfd3` for a protein-only setup, are fine):
+
+```
+Scheduler
+  [ok]  scheduler.type = slurm
+  [ok]  sbatch found on PATH
+SLURM live probe (submits + cancels a 1-min dummy job)
+  [ok]  sbatch accepted the job (test job cancelled).
+Conda environments
+  [ok]  environments.bindcraft = BindCraft (found)
+  [ok]  environments.pesto = pesto (found)
+  [warn] environments.rfd3 = rfd3 -- not in `conda env list`.
+Paths
+  [ok]  paths.bindcraft_dir -> /path/to/BindCraft
+  [ok]  workspace is writable: /scratch/YOUR_NETID/symplify_workspace
+Summary
+  [ok]  No blocking problems found. You're good to launch.
+```
+
+---
+
+## Usage
+
+### Start the server
 
 ```bash
 python run.py
 ```
 
-If on a remote cluster, access via SSH tunnel:
+On a cluster that does not allow jobs on the login node, start the server inside
+an interactive allocation and listen on all interfaces:
 
 ```bash
-# On your local machine:
-ssh -L 8080:localhost:8080 yournetid@yourcluster.edu
-# Then open http://localhost:8080 in your browser
+salloc --nodes=1 --ntasks=1 --time=04:00:00
+module load anaconda3/VERSION
+cd symplify
+python run.py --host 0.0.0.0
+hostname                      # note the node name, e.g. node123
 ```
+
+The server prints a line such as `* Running on http://0.0.0.0:8080`. Design jobs
+are submitted to the scheduler and keep running if the server stops. Restart the
+server and the page picks them up again.
+
+### Open the web page
+
+From your own computer (connect to your university VPN first if you are off campus):
+
+```bash
+ssh -L 8080:NODE_NAME:8080 yournetid@yourcluster.edu
+```
+
+Use `localhost` instead of `NODE_NAME` if the server runs on the login node. If
+local port 8080 is taken, use another, for example `-L 8081:NODE_NAME:8080`, and
+open that port. Then browse to <http://localhost:8080>.
+
+### Run a design
+
+1. Upload a target structure (PDB or CIF), or enter a PDB ID.
+2. Choose the chain. Symplify scores that chain only and suggests hotspot residues.
+3. Review the difficulty score (higher is easier: above 75 is Easy, above 50 Medium, above 30 Hard, otherwise Very Hard) and adjust the hotspots.
+4. Submit. The status page shows each stage as **In queue** (waiting for a node), **Running**, or **Complete**. A stage that hits the scheduler's time limit is resubmitted automatically, up to a limit you can change.
+5. When the run finishes, download the ranked designs. Each has the (GGGGS)n linker appended.
+
+---
+
+## Data and large files
+
+This repository holds source code only. Model weights and datasets are not stored here:
+
+- PeSTo's model weights are in the PeSTo repository, and BindCraft's AlphaFold parameters are downloaded by BindCraft's installer.
+- Datasets, example outputs and any other large files are archived on [Zenodo](https://teams.igem.org/go/deliverables/software/zenodo), which gives each upload a citable DOI. <!-- TODO: add the Zenodo record link(s) once uploaded. -->
 
 ---
 
@@ -99,7 +198,7 @@ paths:
 environments:
   rfd3:      "rfd3"        # conda env with rf3, foundry, ligandmpnn
   bindcraft: "BindCraft"   # conda env with pyrosetta, colabdesign
-  base_module: "anaconda3/2025.12"
+  base_module: "anaconda3/VERSION"   # see: module avail anaconda3
 ```
 
 ---
@@ -109,8 +208,8 @@ environments:
 ```
 symplify/
 ├── run.py                      # server entry point
-├── config.yaml                 # user configuration
-├── requirements.txt
+├── config.yaml.example         # configuration template (copy to config.yaml)
+├── requirements.txt            # web app dependencies
 │
 ├── backend/
 │   ├── app.py                  # Flask API
@@ -118,6 +217,7 @@ symplify/
 │   ├── pipeline_router.py      # routes jobs to RFD3 or BindCraft
 │   ├── difficulty_scorer.py    # bindability difficulty scoring
 │   ├── hotspot_finder.py       # PESTO + RDKit pharmacophore identification
+│   ├── setup_wizard.py         # interactive setup and config validation
 │   └── db.py                   # SQLite job tracking
 │
 ├── pipeline/
