@@ -856,6 +856,8 @@ def main():
     parser.add_argument("--dg_threshold",           type=float, default=1e9)
     parser.add_argument("--unsat_hbonds_threshold", type=float, default=999.0)
     parser.add_argument("--hydrophob_threshold",    type=float, default=999.0)
+    parser.add_argument("--ligand_sdf", default="",
+                        help="Ligand SDF (bond orders) for Rosetta; its residue name must be LIG")
     parser.add_argument("--skip_rosetta", action="store_true",
                         help="Skip Rosetta analysis; its metrics stay empty")
     parser.add_argument("--force_post", action="store_true",
@@ -865,6 +867,8 @@ def main():
     parser.add_argument("--rfd3_override", action="append", default=[],
                         help="Extra Hydra override for `rfd3 design` (repeatable)")
     args = parser.parse_args()
+    if args.ligand_sdf:
+        os.environ["SYMPLIFY_LIGAND_SDF"] = args.ligand_sdf
 
     t_start    = time.time()
     output_dir = Path(args.output_dir)

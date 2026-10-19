@@ -20,6 +20,50 @@ from pathlib import Path
 DALPHABALL = "/scratch/network/ch8337/bindcraft/BindCraft/functions/DAlphaBall.gcc"
 
 
+def _ligand_flag():
+    """Add the ligand definition when a per-job SDF was provided."""
+    import os
+    sdf = os.environ.get("SYMPLIFY_LIGAND_SDF", "")
+    return f" -extra_res_mol {sdf}" if sdf and os.path.exists(sdf) else ""
+
+
+def _with_ligand_renamed(pdb_path, chain="Z", new_name="LIG"):
+    """
+    Rosetta drops a residue named UNL (the generic unknown-ligand name), so score
+    a temporary copy whose ligand residue is renamed to match the SDF. Returns
+    (path_to_use, temp_path_or_None).
+    """
+    import tempfile
+    out, changed = [], False
+    with open(pdb_path) as f:
+        for line in f:
+            if (line.startswith("HETATM") and len(line) > 21 and line[21] == chain
+                    and line[17:20] != new_name):
+                line = line[:17] + new_name + line[20:]
+                changed = True
+            out.append(line)
+    if not changed:
+        return str(pdb_path), None
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".pdb", delete=False)
+    tmp.writelines(out)
+    tmp.close()
+    return tmp.name, tmp.name
+
+
+def _relax_pdb(pdb_path):
+    """FastRelax a design (raw RF3 coordinates clash). Returns a temp PDB path."""
+    import tempfile
+    pr = init_pyrosetta()
+    pose = pr.pose_from_file(pdb_path)
+    relax = pr.rosetta.protocols.relax.FastRelax(pr.get_fa_scorefxn(), 1)
+    relax.constrain_relax_to_start_coords(True)
+    relax.apply(pose)
+    tmp = tempfile.NamedTemporaryFile(suffix=".pdb", delete=False)
+    tmp.close()
+    pose.dump_pdb(tmp.name)
+    return tmp.name
+
+
 def init_pyrosetta():
     """Initialize PyRosetta quietly."""
     import pyrosetta as pr
@@ -28,7 +72,7 @@ def init_pyrosetta():
         "-ignore_unrecognized_res true "
         "-ignore_zero_occupancy false "
         "-load_PDB_components false "
-        f"-holes:dalphaball {DALPHABALL}",
+        f"-holes:dalphaball {DALPHABALL}" + _ligand_flag(),
         silent=True
     )
     return pr
@@ -198,7 +242,24 @@ def run_rosetta_batch(pdb_paths: list, binder_chain: str,
         name = Path(pdb_path).stem
         print(f"  [{i}/{len(pdb_paths)}] Rosetta: {name}")
         try:
-            scores = score_fn(str(pdb_path), binder_chain=binder_chain)
+            use_path, tmp_path = str(pdb_path), None
+            kwargs = {}
+            if pipeline != "bindcraft":
+                use_path, tmp_path = _with_ligand_renamed(pdb_path)
+                _relaxed = _relax_pdb(use_path)
+                if tmp_path:
+                    import os
+                    os.unlink(tmp_path)
+                use_path = tmp_path = _relaxed
+                kwargs["target_chain"] = "Z"
+            try:
+                scores = score_fn(use_path, binder_chain=binder_chain, **kwargs)
+            finally:
+                if tmp_path:
+                    import os
+                    os.unlink(tmp_path)
+            if pipeline != "bindcraft" and scores.get("dSASA") == 0 and scores.get("dG") == 0:
+                raise RuntimeError("empty interface (ligand not loaded or not in contact)")
             results[name] = scores
         except Exception as e:
             print(f"    [WARN] Rosetta failed for {name}: {e}")
