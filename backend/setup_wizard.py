@@ -92,7 +92,8 @@ def load_config():
         bad("PyYAML is not installed in this environment (need it to read config.yaml).")
         return None
     if not CONFIG.exists():
-        bad(f"config.yaml not found at {CONFIG}")
+        bad(f"config.yaml not found at {CONFIG}. "
+            "Create it first: cp config.yaml.example config.yaml")
         return None
     with open(CONFIG) as f:
         return yaml.safe_load(f) or {}

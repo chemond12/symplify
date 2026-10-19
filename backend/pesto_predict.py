@@ -214,7 +214,10 @@ def run_pesto(pdb_path: str, chain: str, out_path: str,
 
     result = {
         "residues":  residue_scores,
-        "hotspots":  clusters[0]["residues"] if clusters else hotspots_sorted,
+        # All residues at/above the threshold (top 20). If none reach it but clusters
+        # exist (they use a lower score cutoff), fall back to the best cluster so the
+        # UI doesn't treat the target as having no interface at all.
+        "hotspots":  hotspots_sorted or (clusters[0]["residues"] if clusters else []),
         "clusters":  clusters,
         "coords":    coords,
         "threshold": threshold,

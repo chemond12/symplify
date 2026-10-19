@@ -1,0 +1,48 @@
+# Symplify configuration — copy this file to config.yaml and edit it:
+#
+#   cp config.yaml.example config.yaml
+#   python backend/setup_wizard.py          # fills in the scheduler section
+#   python backend/setup_wizard.py --check  # validates everything
+#
+# config.yaml is machine-specific and is NOT tracked by git.
+
+server:
+  host: "127.0.0.1"          # use "0.0.0.0" (or run: python run.py --host 0.0.0.0)
+  port: 8080                 # when reaching the server through an SSH tunnel
+
+scheduler:
+  type: slurm                # slurm | pbs | sge | local
+  slurm:
+    gpu_partition: ""        # leave empty if your cluster picks the partition for you
+    cpu_partition: ""
+    account: ""              # your allocation/account, if your cluster requires one
+    extra_flags: ""          # e.g. "--constraint=a100"
+
+paths:
+  workspace: /scratch/YOUR_NETID/symplify_workspace   # job files and outputs; must be writable
+  bindcraft_dir: /path/to/BindCraft                   # protein targets
+  pesto_dir: /path/to/PeSTo                           # optional: automatic hotspot prediction
+  ccd_mirror: ""                                      # small molecules only (RFdiffusion3)
+  rfd3_checkpoint: ""                                 # small molecules only
+  foundry_weights_dir: ""                             # small molecules only
+
+environments:
+  base_module: "anaconda3/VERSION"   # the module that provides conda; see: module avail anaconda3
+  bindcraft: BindCraft               # conda env created by BindCraft's installer
+  rfd3: rfd3                         # conda env for small-molecule targets
+  pesto: pesto                       # conda env for PeSTo
+
+# Resources requested for each stage. hours is the SLURM time limit; a stage that
+# times out is resubmitted automatically (BindCraft resumes from the designs it
+# already accepted). Check your cluster's time limits and queue policies.
+resources:
+  bindcraft:        {gpus: 1, cpus: 8,  mem_gb: 64,  hours: 24}
+  rfd3_generation:  {gpus: 1, cpus: 8,  mem_gb: 64,  hours: 24}
+  rf3_scoring:      {gpus: 1, cpus: 8,  mem_gb: 64,  hours: 24}
+  post_processing:  {cpus: 32, mem_gb: 128, hours: 12}
+
+defaults:
+  mpnn_per_backbone: 8
+  linker_repeats: 3          # length of the (GGGGS)n linker appended to ranked designs
+  iptm_threshold: 0.8
+  ptm_threshold: 0.8
