@@ -20,6 +20,8 @@ BindCraft flow:
 import json
 import os
 import sys
+import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -119,6 +121,32 @@ def _first_model_pdb(pdb_path: str, out_dir) -> str:
     with open(out_path, "w") as f:
         f.writelines(kept)
     return out_path
+
+def _map_finder_atoms(hotspots, pdb_path, chain, resnum):
+    """
+    The hotspot finder names atoms element + 0-based RDKit index ("O0", "C72").
+    The converted ligand file names them per element ("O1", "C2"). Translate by
+    index, and accept a name only if the element at that index matches.
+    Returns (file_atom_names, unmapped_finder_names).
+    """
+    atoms = []
+    with open(pdb_path) as f:
+        for line in f:
+            if (line.startswith("HETATM") and line[21] == chain
+                    and line[22:26].strip() == str(resnum)):
+                name = line[12:16].strip()
+                el = (line[76:78].strip() if len(line) > 77 else "") \
+                     or "".join(c for c in name if c.isalpha())[:1]
+                atoms.append((name, el.capitalize()))
+    mapped, unmapped = [], []
+    for h in hotspots:
+        m = re.fullmatch(r"([A-Za-z]{1,2})(\d+)", str(h))
+        if m and int(m.group(2)) < len(atoms) \
+                and atoms[int(m.group(2))][1] == m.group(1).capitalize():
+            mapped.append(atoms[int(m.group(2))][0])
+        else:
+            unmapped.append(h)
+    return mapped, unmapped
 
 def _ligand_pdb_for_rfd3(pdb_path: str) -> str:
     """
@@ -259,6 +287,7 @@ class PipelineRouter:
             f"--dg_threshold {thr.get('dg', 1e9)} "
             f"--unsat_hbonds_threshold {thr.get('delta_unsat_hbonds', 999.0)} "
             f"--hydrophob_threshold {thr.get('surface_hydrophobicity', 999.0)} "
+            + ("--skip_rosetta " if config.get("skip_rosetta") else "")
         )
     
     def submit(self, job_id, target_type, target_file, config):
@@ -295,6 +324,154 @@ class PipelineRouter:
     # -----------------------------------------------------------------------
 
     def _submit_rfd3_pilot(self, job_id, target_file, config, job_dir, log_dir):
+        """
+        Small-molecule pilot with two arms on the same ligand file:
+          all   - select_buried = ALL
+          atoms - select_buried = the pharmacophore atoms chosen on the analysis page
+        pilot_select.py carries the better arm forward as the job's pilot.
+        With no usable atoms this is the single ALL pilot.
+        """
+        job_dir = Path(job_dir)
+        ligand_path = job_dir / "target_ligand.pdb"
+        shutil.copy2(_ensure_ligand_pdb(target_file), ligand_path)
+        ligand_file = str(ligand_path)
+
+        hotspots = config.get("hotspots", [])
+        use_ab   = config.get("pilot_ab", self.defaults.get("pilot_ab", True))
+        if not use_ab or not hotspots:
+            return self._submit_rfd3_pilot_single(job_id, ligand_file, config, job_dir, log_dir)
+
+        ligand_resname = config.get("ligand_resname") or _detect_ligand(ligand_file)
+        ligand_chain   = config.get("ligand_chain")   or _detect_ligand_chain(ligand_file)
+        ligand_resnum  = config.get("ligand_resnum")  or _detect_ligand_resnum(ligand_file)
+        ligand_key     = f"{ligand_chain}{ligand_resnum}"
+
+        atoms, unmapped = _map_finder_atoms(hotspots, ligand_file, ligand_chain, ligand_resnum)
+        if unmapped:
+            print(f"[pipeline_router] pilot A/B: hotspot atoms {unmapped} do not map onto "
+                  f"{Path(ligand_file).name}", flush=True)
+        if not atoms:
+            print("[pipeline_router] pilot A/B: no atoms mapped; running the ALL pilot only", flush=True)
+            return self._submit_rfd3_pilot_single(job_id, ligand_file,
+                                                  dict(config, hotspots=[]), job_dir, log_dir)
+
+        defaults        = self.defaults
+        mpnn_per_bb     = config.get("mpnn_per_bb", defaults.get("mpnn_per_backbone", 8))
+        target_pass     = config.get("target_passing", 96)
+        iptm_thresh     = config.get("iptm_threshold", defaults.get("iptm_threshold", 0.8))
+        ptm_thresh      = config.get("ptm_threshold", defaults.get("ptm_threshold", 0.8))
+        min_ipae_thresh = config.get("min_ipae_threshold", 1.0)
+        margin          = float(config.get("pilot_ab_margin", defaults.get("pilot_ab_margin", 0.03)))
+
+        pipeline_script = self.pipeline_dir / "rfd3" / "pipeline_rfd3.py"
+        pilot_script    = self.pipeline_dir / "rfd3" / "pilot_rf3.py"
+        select_script   = self.pipeline_dir / "rfd3" / "pilot_select.py"
+
+        example_name = f"symplify_{job_id[:8]}"
+        arms_dir = job_dir / "pilot_arms"
+        arms = (("all", "", "ALL"), ("atoms", "_b", atoms))
+        for arm, _, buried in arms:
+            arm_dir = arms_dir / arm
+            arm_dir.mkdir(parents=True, exist_ok=True)
+            cfg = {example_name: {
+                "input":              ligand_file,
+                "length":             config.get("length", "80-150"),
+                "ligand":             ligand_resname,
+                "select_fixed_atoms": {ligand_key: "ALL"},
+                "select_buried":      {ligand_key: buried},
+            }}
+            with open(arm_dir / "rfd3_config.json", "w") as f:
+                json.dump(cfg, f, indent=2)
+        # placeholder until pilot_select.py copies the winner's config here
+        shutil.copy2(arms_dir / "all" / "rfd3_config.json", job_dir / "rfd3_config.json")
+
+        env_vars = {
+            "CCD_MIRROR_PATH":         self.paths.get("ccd_mirror", ""),
+            "RFD3_CHECKPOINT":         self.paths.get("rfd3_checkpoint",
+                                       "/scratch/network/ch8337/foundry_weights/rfd3_latest.ckpt"),
+            "FOUNDRY_CHECKPOINT_DIRS": self.paths.get("foundry_weights_dir",
+                                       "/scratch/network/ch8337/foundry_weights"),
+        }
+        module   = self.envs.get("base_module", "")
+        rfd3_env = self.envs.get("rfd3", "rfd3")
+        res      = self.resources
+
+        gen_ids, rf3_ids = {}, {}
+        for arm, sfx, _ in arms:
+            arm_dir = arms_dir / arm
+            gen_cmd = (
+                f"python {pipeline_script} "
+                f"--config {arm_dir}/rfd3_config.json "
+                f"--input_pdb {ligand_file} "
+                f"--output_dir {arm_dir} "
+                f"--n_designs 100 "
+                f"--mpnn_per_bb {mpnn_per_bb} "
+                f"--skip_rf3 --stop_after mpnn"
+            )
+            gen_ids[arm] = self.scheduler.submit(JobSpec(
+                name        = f"sym_{job_id[:8]}_pilot_gen{sfx}",
+                command     = gen_cmd,
+                log_dir     = log_dir,
+                gpus        = res.get("rfd3_generation", {}).get("gpus", 1),
+                cpus        = res.get("rfd3_generation", {}).get("cpus", 8),
+                mem_gb      = res.get("rfd3_generation", {}).get("mem_gb", 64),
+                hours       = 4,
+                env_vars    = env_vars,
+                conda_env   = rfd3_env,
+                module_load = module,
+            ))
+            rf3_cmd = (
+                f"python {pilot_script} "
+                f"--mpnn_dir {arm_dir}/mpnn_outputs "
+                f"--output_dir {arm_dir} "
+                f"--target_passing {target_pass} "
+                f"--iptm_threshold {iptm_thresh} "
+                f"--ptm_threshold {ptm_thresh} "
+                f"--min_ipae_threshold {min_ipae_thresh} "
+                f"--n_pilot 100"
+            )
+            rf3_ids[arm] = self.scheduler.submit(JobSpec(
+                name            = f"sym_{job_id[:8]}_pilot_rf3{sfx}",
+                command         = rf3_cmd,
+                log_dir         = log_dir,
+                gpus            = 1,
+                cpus            = 8,
+                mem_gb          = 64,
+                hours           = 4,
+                depends_on      = [gen_ids[arm]],
+                dependency_type = "afterany",
+                env_vars        = env_vars,
+                conda_env       = rfd3_env,
+                module_load     = module,
+            ))
+            print(f"[pipeline_router] pilot arm '{arm}': gen {gen_ids[arm]}, "
+                  f"score {rf3_ids[arm]}", flush=True)
+
+        select_cmd = (
+            f"python {select_script} "
+            f"--job_dir {job_dir} --job_id {job_id} --db_path {self.db_path} "
+            f"--margin {margin}"
+        )
+        select_id = self.scheduler.submit(JobSpec(
+            name            = f"sym_{job_id[:8]}_pilot_select",
+            command         = select_cmd,
+            log_dir         = log_dir,
+            gpus            = 0,
+            cpus            = 2,
+            mem_gb          = 8,
+            hours           = 1,
+            depends_on      = list(rf3_ids.values()),
+            dependency_type = "afterany",
+            conda_env       = rfd3_env,
+            module_load     = module,
+        ))
+        print(f"[pipeline_router] pilot select job: {select_id}", flush=True)
+
+        # Bubbles: generation follows the ALL arm, scoring follows the select job
+        db.update_stage(job_id, "pilot_generation", "running", scheduler_id=str(gen_ids["all"]))
+        db.update_stage(job_id, "pilot_rf3_scoring", "pending", scheduler_id=str(select_id))
+
+    def _submit_rfd3_pilot_single(self, job_id, target_file, config, job_dir, log_dir):
         target_file  = _ensure_ligand_pdb(target_file)
         defaults     = self.defaults
         mpnn_per_bb  = config.get("mpnn_per_bb",    defaults.get("mpnn_per_backbone", 8))
@@ -328,6 +505,17 @@ class PipelineRouter:
             # → specify as atom list within the ligand chain key
             # Hotspots for proteins are residue IDs — not used for RFD3
             atom_names = [h for h in hotspots if len(h) <= 4 and h[0].isalpha()]
+            present = set()
+            with open(target_file) as f:
+                for line in f:
+                    if (line.startswith("HETATM") and line[21] == ligand_chain
+                            and line[22:26].strip() == str(ligand_resnum)):
+                        present.add(line[12:16].strip())
+            dropped = [a for a in atom_names if a not in present]
+            if dropped:
+                print(f"[pipeline_router] WARNING: hotspot atoms {dropped} are not in "
+                      f"{Path(target_file).name}; ignoring them", flush=True)
+            atom_names = [a for a in atom_names if a in present]
             if atom_names:
                 rfd3_config[example_name]["select_buried"] = {ligand_key: atom_names}
             else:
@@ -424,7 +612,7 @@ class PipelineRouter:
         defaults     = self.defaults
         n_designs    = config.get("n_designs",    5000)
         mpnn_per_bb  = config.get("mpnn_per_bb",  defaults.get("mpnn_per_backbone", 8))
-        linker_rep   = config.get("linker_repeats", defaults.get("linker_repeats", 3))
+        linker_rep   = config.get("linker_repeats", defaults.get("linker_repeats", 0))
 
         pipeline_script = self.pipeline_dir / "rfd3" / "pipeline_rfd3.py"
         rfd3_cfg_path   = str(job_dir / "rfd3_config.json")
@@ -550,7 +738,7 @@ class PipelineRouter:
 
         n_designs    = config.get("n_designs", 5000)
         mpnn_per_bb  = config.get("mpnn_per_bb", self.defaults.get("mpnn_per_backbone", 8))
-        linker_rep   = config.get("linker_repeats", self.defaults.get("linker_repeats", 3))
+        linker_rep   = config.get("linker_repeats", self.defaults.get("linker_repeats", 0))
         pipeline_script = self.pipeline_dir / "rfd3" / "pipeline_rfd3.py"
         rfd3_cfg_path   = str(job_dir / "rfd3_config.json")
 
@@ -684,6 +872,59 @@ class PipelineRouter:
         )
         return self.scheduler.submit(spec)
 
+    def submit_post_forced(self, job_id, top_n):
+        """
+        Re-run RFD3 post-processing on the top `top_n` scored designs by ipTM,
+        bypassing the metric filters. Scoring is finished, so no dependency.
+        """
+        job = db.get_job(job_id)
+        if not job:
+            raise ValueError(f"Job {job_id} not found")
+        config      = job.get("config") or {}
+        target_file = job.get("target_file", "")
+        job_dir     = self.workspace / job_id
+        log_dir     = str(job_dir / "logs")
+        n_designs   = config.get("n_designs", 5000)
+        mpnn_per_bb = config.get("mpnn_per_bb", self.defaults.get("mpnn_per_backbone", 8))
+        linker_rep  = config.get("linker_repeats", self.defaults.get("linker_repeats", 0))
+        pipeline_script = self.pipeline_dir / "rfd3" / "pipeline_rfd3.py"
+        rfd3_cfg_path   = str(job_dir / "rfd3_config.json")
+        module  = self.envs.get("base_module", "")
+        bc_env  = self.envs.get("bindcraft", "BindCraft")
+        bc_path = self.paths.get("bindcraft_dir", "")
+        res     = self.resources
+
+        cmd = (
+            f"python {pipeline_script} "
+            f"--config {rfd3_cfg_path} "
+            f"--input_pdb {target_file} "
+            f"--output_dir {job_dir}/full_run "
+            f"--n_designs {n_designs} "
+            f"--mpnn_per_bb {mpnn_per_bb} "
+            f"--linker_repeats {linker_rep} "
+            f"{self._filter_args(config)}"
+            f"--workers ${{SLURM_CPUS_PER_TASK:-32}} "
+            f"--skip_rfd3 --skip_mpnn --skip_rf3 "
+            f"--job_id {job_id} --db_path {self.db_path} "
+            f"--force_post --force_top {int(top_n)}"
+        )
+        spec = JobSpec(
+            name        = f"sym_{job_id[:8]}_post_forced",
+            command     = cmd,
+            log_dir     = log_dir,
+            gpus        = 0,
+            cpus        = min(8,  res.get("post_processing", {}).get("cpus", 32)),
+            mem_gb      = min(32, res.get("post_processing", {}).get("mem_gb", 128)),
+            hours       = res.get("post_processing", {}).get("hours", 12),
+            env_vars    = {"PYTHONPATH": f"{bc_path}:${{PYTHONPATH:-}}"},
+            conda_env   = bc_env,
+            module_load = module,
+        )
+        new_jid = self.scheduler.submit(spec)
+        db.update_stage(job_id, "post_processing", "pending", scheduler_id=str(new_jid))
+        print(f"[pipeline_router] Forced post-processing for job {job_id}: {new_jid}", flush=True)
+        return new_jid
+
     def _resubmit_rf3_scoring(self, job_id, job, job_dir, log_dir):
         """
         Resubmit a timed-out full-run RF3 scoring job. run_rf3_scoring()
@@ -696,7 +937,7 @@ class PipelineRouter:
         target_file = job.get("target_file", "")
         n_designs   = config.get("n_designs", 5000)
         mpnn_per_bb = config.get("mpnn_per_bb", self.defaults.get("mpnn_per_backbone", 8))
-        linker_rep  = config.get("linker_repeats", self.defaults.get("linker_repeats", 3))
+        linker_rep  = config.get("linker_repeats", self.defaults.get("linker_repeats", 0))
         pipeline_script = self.pipeline_dir / "rfd3" / "pipeline_rfd3.py"
         rfd3_cfg_path   = str(job_dir / "rfd3_config.json")
 
@@ -786,7 +1027,7 @@ class PipelineRouter:
         pointed at the now-dead design job and can never be satisfied.
         """
         config        = job.get("config") or {}
-        linker_rep    = config.get("linker_repeats", self.defaults.get("linker_repeats", 3))
+        linker_rep    = config.get("linker_repeats", self.defaults.get("linker_repeats", 0))
         settings_path = str(job_dir / "bc_settings.json")
         with open(settings_path) as f:
             target_file = json.load(f).get("starting_pdb", job.get("target_file", ""))
@@ -862,7 +1103,7 @@ class PipelineRouter:
     
     def _submit_bindcraft(self, job_id, target_file, config, job_dir, log_dir):
         defaults    = self.defaults
-        linker_rep  = config.get("linker_repeats", defaults.get("linker_repeats", 3))
+        linker_rep  = config.get("linker_repeats", defaults.get("linker_repeats", 0))
         hotspots    = config.get("hotspots", [])
         chain       = config.get("chain", "A")
         n_designs   = config.get("n_designs", 100)

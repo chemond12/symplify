@@ -17,6 +17,9 @@ import argparse
 from pathlib import Path
 
 
+DALPHABALL = "/scratch/network/ch8337/bindcraft/BindCraft/functions/DAlphaBall.gcc"
+
+
 def init_pyrosetta():
     """Initialize PyRosetta quietly."""
     import pyrosetta as pr
@@ -24,7 +27,8 @@ def init_pyrosetta():
         "-mute all "
         "-ignore_unrecognized_res true "
         "-ignore_zero_occupancy false "
-        "-load_PDB_components false",
+        "-load_PDB_components false "
+        f"-holes:dalphaball {DALPHABALL}",
         silent=True
     )
     return pr

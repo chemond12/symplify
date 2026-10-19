@@ -1345,9 +1345,29 @@ const API = {
     return r.json();
   },
   async getJob(id)     { return (await fetch(`/api/jobs/${id}`)).json(); },
+  async deleteJob(id, files) {
+    const r = await fetch(`/api/jobs/${id}?files=${files ? 'true' : 'false'}`, { method: 'DELETE' });
+    return r.json();
+  },
   async listJobs()     { return (await fetch('/api/jobs')).json(); },
-  async getResults(id) { return (await fetch(`/api/jobs/${id}/results`)).json(); },
-    async extendResubmits(id, additional) {
+  async getResults(id) { return (await fetch(`/api/jobs/${id}/results?limit=1000`)).json(); },
+  async continuePost(id, topN) {
+    const r = await fetch(`/api/jobs/${id}/continue-post`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ top_n: topN }),
+    });
+    return r.json();
+  },
+  async appendLinker(id, repeats) {
+    const r = await fetch(`/api/jobs/${id}/append-linker`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repeats }),
+    });
+    return r.json();
+  },
+  async extendResubmits(id, additional) {
     const r = await fetch(`/api/jobs/${id}/extend-resubmits`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2530,6 +2550,30 @@ function StatusPage({ jobId, onResults, onNewJob }) {
   const [stages,     setStages]     = useState([]);
   const [cancelling, setCancelling] = useState(false);
   const [cancelConfirm, setCancelConfirm] = useState(false);
+  const [forceTop, setForceTop] = useState(50);
+  const [forcing,  setForcing]  = useState(false);
+  const [forceMsg, setForceMsg] = useState('');
+
+  async function handleContinuePost() {
+    const n = parseInt(forceTop);
+    if (!n || n < 1) { setForceMsg('Enter a number of designs'); return; }
+    setForcing(true);
+    setForceMsg('');
+    try {
+      const res = await API.continuePost(jobId, n);
+      if (res.error) {
+        setForceMsg(res.error);
+      } else {
+        const j = await API.getJob(jobId);
+        setJob(j);
+        setStages(j.stages || []);
+      }
+    } catch (e) {
+      setForceMsg('Request failed');
+    } finally {
+      setForcing(false);
+    }
+  }
   const [extending,   setExtending]   = useState(false);
   const [customExtra, setCustomExtra] = useState(5);
 
@@ -2675,6 +2719,37 @@ function StatusPage({ jobId, onResults, onNewJob }) {
                     onClick={() => handleExtend(parseInt(customExtra) || 0)}>
               Add custom
             </button>
+          </div>
+        </div>
+      )}
+
+      {job.no_survivors && (
+        <div style={{border:'1px solid var(--amber)', borderRadius:8,
+                     padding:'14px 16px', marginBottom:20}}>
+          <div style={{fontSize:14, color:'var(--white)', marginBottom:6}}>
+            No scored designs meet criteria
+          </div>
+          <div style={{fontSize:12, color:'var(--grey-2)', marginBottom:10, lineHeight:1.5}}>
+            {(job.no_survivors.n_scored || 0).toLocaleString()} designs were scored and none passed
+            the {job.no_survivors.stage === 'rosetta' ? 'Rosetta' : 'RF3'} filters.
+            {job.no_survivors.top?.[0] && <> Best ipTM {job.no_survivors.top[0].iptm}.</>}
+            {' '}First criterion each design failed:{' '}
+            {Object.entries(job.no_survivors.reasons || {})
+              .map(([k, n]) => `${k} ${n.toLocaleString()}`).join(' · ')}
+          </div>
+          <div style={{display:'flex', gap:8, alignItems:'center', flexWrap:'wrap'}}>
+            <span className="field-label" style={{marginBottom:0}}>Top</span>
+            <input className="input" type="number" min={1} max={1000} style={{width:80}}
+                   value={forceTop} onChange={e => setForceTop(e.target.value)} />
+            <span style={{fontSize:12, color:'var(--grey-2)'}}>by ipTM</span>
+            <button className="btn-secondary" style={{padding:'6px 14px', fontSize:12}}
+                    disabled={forcing} onClick={handleContinuePost}>
+              {forcing ? <Spinner /> : 'Continue to post-processing anyway'}
+            </button>
+            {forceMsg && <span style={{fontSize:12, color:'var(--grey-2)'}}>{forceMsg}</span>}
+          </div>
+          <div style={{fontSize:11, color:'var(--grey-3)', marginTop:8}}>
+            Skips the metric filters and runs terminus scoring, Rosetta and ranking on the top N.
           </div>
         </div>
       )}
@@ -2847,11 +2922,109 @@ const METRIC_DEFS = {
   c_terminus_sasa:      { label: 'C-term SASA (Å²)', thresholds: { good: 40,  bad: 20,   dir: 'high' } },
 };
 
+function shortName(n) {
+  return String(n || '')
+    .replace(/^rfd3_config_symplify_[0-9a-f]{8}_/, '')
+    .replace(/_unnamed_b0_/, '_')
+    .replace(/^sym_[0-9a-f]{8}_/, '');
+}
+
+function ResultsViewer({ jobId, rank, linker, binderChain }) {
+  const containerRef = useRef(null);
+  const [status, setStatus] = useState('loading');
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || rank == null) return;
+    if (!window.$3Dmol) { setStatus('3Dmol not available'); return; }
+    setStatus('loading');
+    let cancelled = false;
+
+    const divEl = document.createElement('div');
+    divEl.style.width    = '100%';
+    divEl.style.height   = '320px';
+    divEl.style.position = 'relative';
+    container.appendChild(divEl);
+    const viewer = window.$3Dmol.createViewer(divEl, {
+      backgroundColor: 0x0B1628,
+      antialias: true,
+    });
+
+    fetch(API.structureUrl(jobId, rank, linker))
+      .then(r => {
+        if (!r.ok) throw new Error(r.status === 404 ? 'Structure file not found' : `HTTP ${r.status}`);
+        return r.text();
+      })
+      .then(text => {
+        if (cancelled) return;
+        viewer.addModel(text, 'pdb');
+        viewer.setStyle({}, { cartoon: { color: '#A4AEBD', opacity: 0.85 } });
+        viewer.setStyle({ chain: binderChain }, { cartoon: { color: '#00C2B2' } });
+        viewer.setStyle({ hetflag: true }, { stick: { radius: 0.2 } });
+        viewer.zoomTo();
+        viewer.resize();
+        viewer.render();
+        setStatus('ready');
+      })
+      .catch(e => { if (!cancelled) setStatus(String(e.message || e)); });
+
+    return () => {
+      cancelled = true;
+      try { viewer.clear(); } catch (e) {}
+      if (divEl.parentNode) divEl.parentNode.removeChild(divEl);
+    };
+  }, [jobId, rank, linker, binderChain]);
+
+  return (
+    <div style={{position:'relative', width:'100%', minWidth:0, alignSelf:'stretch', flex:'1 1 auto'}}>
+      <div ref={containerRef} style={{width:'100%', height:320, overflow:'hidden'}} />
+      {status !== 'ready' && (
+        <div style={{position:'absolute', inset:0, display:'flex', alignItems:'center',
+                     justifyContent:'center', color:'var(--grey-2)', fontSize:12,
+                     pointerEvents:'none'}}>
+          {status === 'loading' ? 'Loading structure…' : status}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ResultsPage({ jobId, onNewJob }) {
   const [results,  setResults]  = useState([]);
   const [selected, setSelected] = useState(0);
   const [loading,  setLoading]  = useState(true);
   const [linker,   setLinker]   = useState(false);
+  const [targetType, setTargetType] = useState(null);
+  useEffect(() => {
+    API.getJob(jobId).then(j => setTargetType(j.target_type)).catch(() => setTargetType('protein'));
+  }, [jobId]);
+  const [linkerRep, setLinkerRep] = useState(3);
+  const [applying,  setApplying]  = useState(false);
+  const [linkerMsg, setLinkerMsg] = useState('');
+  const [showCount, setShowCount] = useState(50);
+
+  async function applyLinker() {
+    setApplying(true);
+    setLinkerMsg('');
+    try {
+      const res = await API.appendLinker(jobId, linkerRep);
+      if (res.error) {
+        setLinkerMsg(res.error);
+      } else {
+        setLinkerMsg(`Linker added to ${res.applied} designs` +
+                     (res.failed ? ` (${res.failed} failed: ${res.first_error})` : ''));
+        setResults(await API.getResults(jobId));
+      }
+    } catch (e) {
+      setLinkerMsg('Request failed');
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  useEffect(() => {
+    if (linker && !results[selected]?.linker_pdb_path) setLinker(false);
+  }, [selected, results, linker]);
 
   useEffect(() => {
     API.getResults(jobId).then(r => { setResults(r); setLoading(false); });
@@ -2874,6 +3047,8 @@ function ResultsPage({ jobId, onNewJob }) {
 
   const sel = results[selected];
   const m   = sel?.metrics || {};
+  // BindCraft binder is chain B; RFD3 (small molecule) binder is chain A
+  const binderChain = targetType === 'small_molecule' ? 'A' : 'B';
 
   return (
     <div className="results-page">
@@ -2885,19 +3060,33 @@ function ResultsPage({ jobId, onNewJob }) {
         <button className="btn-secondary" onClick={onNewJob}>+ New job</button>
       </div>
 
+      <div className="field-group" style={{display:'flex', alignItems:'center', gap:10,
+                                           flexWrap:'wrap', marginBottom:20}}>
+        <span className="field-label" style={{marginBottom:0}}>GS linker</span>
+        <input className="input" type="number" min="1" max="10" style={{width:70}}
+               value={linkerRep}
+               onChange={e => setLinkerRep(Math.max(1, Math.min(10, parseInt(e.target.value) || 1)))} />
+        <span style={{color:'var(--grey-2)', fontSize:12}}>× GGGGS = {linkerRep * 5} residues</span>
+        <button className="btn-secondary" style={{padding:'6px 14px', fontSize:12}}
+                disabled={applying} onClick={applyLinker}>
+          {applying ? <Spinner /> : 'Append linker to all designs'}
+        </button>
+        {linkerMsg && <span style={{color:'var(--grey-2)', fontSize:12}}>{linkerMsg}</span>}
+      </div>
+
       <div className="results-layout">
         {/* List */}
-        <div className="results-list">
-          {results.slice(0, 30).map((r, i) => {
+        <div className="results-list" style={{minWidth:0}}>
+          {results.slice(0, showCount).map((r, i) => {
             const ms = r.metrics || {};
             const iptm = parseFloat(ms.iptm || ms.avg_iptm || 0);
             return (
               <div key={r.id} className={`result-card ${selected === i ? 'selected' : ''}`}
                    onClick={() => setSelected(i)}>
                 <div className="result-rank">#{r.rank}</div>
-                <div>
-                  <div className="result-name">{r.design_name}</div>
-                  <div className="result-metrics">
+                <div style={{minWidth:0, flex:'1 1 auto'}}>
+                  <div className="result-name" title={r.design_name} style={{overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>{shortName(r.design_name)}</div>
+                  <div className="result-metrics" style={{flexWrap:'wrap'}}>
                     {['iptm','ptm','min_ipae','dG','c_terminus_score'].map(k => {
                       const v = ms[k] ?? ms[`avg_${k}`];
                       if (v == null) return null;
@@ -2918,40 +3107,39 @@ function ResultsPage({ jobId, onNewJob }) {
                     })}
                   </div>
                 </div>
-                <div>
+                <div style={{flexShrink:0}}>
                   <div className="result-score">{iptm.toFixed(3)}</div>
                   <div className="result-score-label">ipTM</div>
                 </div>
               </div>
             );
           })}
+          {results.length > showCount && (
+            <button className="btn-secondary" style={{margin:'10px 0', fontSize:12, padding:'6px 14px'}}
+                    onClick={() => setShowCount(c => c + 50)}>
+              Show more ({results.length - showCount} remaining)
+            </button>
+          )}
         </div>
 
         {/* Detail */}
         <div className="detail-panel">
           <div className="structure-viewer">
-            <div className="viewer-placeholder">
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none"
-                   stroke="currentColor" strokeWidth="1">
-                <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/>
-                <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
-                <line x1="12" y1="22.08" x2="12" y2="12"/>
-              </svg>
-              <div style={{fontSize:12, color:'var(--grey-2)'}}>
-                Structure viewer<br/>
-                <span style={{fontSize:10}}>Install Mol* for 3D visualization</span>
-              </div>
-            </div>
+            {targetType && sel && (
+              <ResultsViewer jobId={jobId} rank={sel.rank} linker={linker} binderChain={binderChain} />
+            )}
             <div className="viewer-controls">
               <button className={`viewer-btn ${!linker ? 'active' : ''}`}
                       onClick={() => setLinker(false)}>Binder</button>
-              <button className={`viewer-btn ${linker ? 'active' : ''}`}
-                      onClick={() => setLinker(true)}>+ Linker</button>
+              {sel?.linker_pdb_path && (
+                <button className={`viewer-btn ${linker ? 'active' : ''}`}
+                        onClick={() => setLinker(true)}>+ Linker</button>
+              )}
             </div>
           </div>
 
           <div className="detail-metrics">
-            <h3>{sel?.design_name}</h3>
+            <h3 style={{wordBreak:'break-all'}}>{sel?.design_name}</h3>
             <table className="metrics-table">
               <tbody>
                 {Object.entries(METRIC_DEFS).map(([k, def]) => {
@@ -2983,12 +3171,14 @@ function ResultsPage({ jobId, onNewJob }) {
                 ↓ PDB
               </button>
             </a>
-            <a href={API.structureUrl(jobId, sel?.rank, true)}
-               download={`${sel?.design_name}_linker.pdb`}>
-              <button className="btn-primary" style={{fontSize:12, padding:'8px 14px'}}>
-                ↓ PDB + linker
-              </button>
-            </a>
+            {sel?.linker_pdb_path && (
+              <a href={API.structureUrl(jobId, sel?.rank, true)}
+                 download={`${sel?.design_name}_linker.pdb`}>
+                <button className="btn-primary" style={{fontSize:12, padding:'8px 14px'}}>
+                  ↓ PDB + linker
+                </button>
+              </a>
+            )}
           </div>
         </div>
       </div>
@@ -3007,6 +3197,31 @@ function JobsPage({ onSelect }) {
     API.listJobs().then(j => { setJobs(j); setLoading(false); });
   }, []);
 
+  const [confirmJob, setConfirmJob] = useState(null);
+  const [alsoFiles,  setAlsoFiles]  = useState(false);
+  const [deleting,   setDeleting]   = useState(false);
+  const [deleteMsg,  setDeleteMsg]  = useState('');
+
+  async function doDelete() {
+    if (!confirmJob) return;
+    setDeleting(true);
+    setDeleteMsg('');
+    try {
+      const res = await API.deleteJob(confirmJob.id, alsoFiles);
+      if (res.error) {
+        setDeleteMsg(res.error);
+      } else {
+        setConfirmJob(null);
+        setAlsoFiles(false);
+        setJobs(await API.listJobs());
+      }
+    } catch (e) {
+      setDeleteMsg('Request failed');
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   if (loading) return (
     <div className="jobs-page">
       <div className="loading-overlay"><Spinner /> Loading…</div>
@@ -3017,6 +3232,36 @@ function JobsPage({ onSelect }) {
     <div className="jobs-page">
       <h1 className="page-title" style={{marginBottom:8}}>All jobs</h1>
       <p className="page-sub" style={{marginBottom:32}}>Click a job to view its status and results.</p>
+
+      {confirmJob && (
+        <div style={{border:'1px solid var(--red)', borderRadius:8, padding:'14px 16px', marginBottom:20}}>
+          <div style={{fontSize:14, color:'var(--white)', marginBottom:6}}>
+            Delete {confirmJob.name} ({confirmJob.id.slice(0, 8)})?
+          </div>
+          <div style={{fontSize:12, color:'var(--grey-2)', marginBottom:10, lineHeight:1.5}}>
+            Removes the job, its stages and its ranked results from Symplify.
+            {!['completed','failed','cancelled'].includes(confirmJob.status) &&
+              ' Any cluster jobs it still has queued or running will be cancelled.'}
+          </div>
+          <label style={{display:'flex', alignItems:'center', gap:8, fontSize:12,
+                         color:'var(--grey-1)', marginBottom:10}}>
+            <input type="checkbox" checked={alsoFiles} onChange={e => setAlsoFiles(e.target.checked)} />
+            Also delete this job's files on disk (cannot be undone)
+          </label>
+          <div style={{display:'flex', gap:8, alignItems:'center', flexWrap:'wrap'}}>
+            <button className="btn-secondary"
+                    style={{padding:'6px 14px', fontSize:12, borderColor:'var(--red)', color:'var(--red)'}}
+                    disabled={deleting} onClick={doDelete}>
+              {deleting ? <Spinner /> : 'Delete job'}
+            </button>
+            <button className="btn-secondary" style={{padding:'6px 14px', fontSize:12}}
+                    disabled={deleting} onClick={() => setConfirmJob(null)}>
+              Cancel
+            </button>
+            {deleteMsg && <span style={{fontSize:12, color:'var(--red)'}}>{deleteMsg}</span>}
+          </div>
+        </div>
+      )}
 
       {jobs.length === 0 ? (
         <div className="empty-state">
@@ -3032,6 +3277,7 @@ function JobsPage({ onSelect }) {
               <th>Status</th>
               <th>Difficulty</th>
               <th>Created</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -3049,6 +3295,12 @@ function JobsPage({ onSelect }) {
                 </td>
                 <td style={{color:'var(--grey-2)', fontFamily:'var(--font-mono)', fontSize:11}}>
                   {new Date(j.created_at * 1000).toLocaleDateString()}
+                </td>
+                <td style={{textAlign:'right'}}>
+                  <span style={{color:'var(--red)', fontSize:12, cursor:'pointer'}}
+                        onClick={e => { e.stopPropagation(); setConfirmJob(j); setAlsoFiles(false); setDeleteMsg(''); }}>
+                    Delete
+                  </span>
                 </td>
               </tr>
             ))}

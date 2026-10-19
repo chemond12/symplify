@@ -179,6 +179,29 @@ def _job_max_resubmits(job):
     except (TypeError, ValueError):
         return MAX_RESUBMITS
 
+def _no_survivors_info(job_id, stages):
+    post = next((s for s in stages if s["stage_name"] == "post_processing"), None)
+    if not post or post["status"] != "failed":
+        return None
+    p = (Path(CFG.get("paths", {}).get("workspace", "/tmp/symplify"))
+         / job_id / "full_run" / "no_survivors.json")
+    try:
+        with open(p) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+def _maybe_complete_job(job_id, stages):
+    """Mark the job completed once every stage is completed."""
+    if not stages or any(st["status"] != "completed" for st in stages):
+        return
+    job = db.get_job(job_id) or {}
+    if job.get("status") in ("completed", "failed", "cancelled"):
+        return
+    db.update_job_status(job_id, "completed")
+    print(f"[poll] {job_id[:8]}: all stages completed, job marked completed", flush=True)
+
+
 def _poll_job_stages(job_id):
     """
     Sync stage statuses with the scheduler and resubmit timed-out stages.
@@ -211,7 +234,9 @@ def _poll_job_stages(job_id):
                 outcome = auto_resubmit.handle_timeout(router, job_id, name, stage["scheduler_id"])
                 if outcome == "resubmitted":
                     break   # downstream stages were rewritten; re-poll them next cycle
-        return db.get_stages(job_id)
+        final = db.get_stages(job_id)
+        _maybe_complete_job(job_id, final)
+        return final
 
 
 def _background_poller():
@@ -252,6 +277,8 @@ def get_job(job_id):
     ]
     job["resubmit_info"] = {"max": max_resubmits, "counts": counts,
                             "exhausted_stages": exhausted}
+    
+    job["no_survivors"] = _no_survivors_info(job_id, stages)
 
     job["stages"] = stages
     # Job-level badge: "queued" while nothing has actually started running
@@ -369,6 +396,55 @@ def get_structure(job_id, rank):
     return jsonify({"error": "Structure not found"}), 404
 
 
+@app.route("/api/jobs/<job_id>", methods=["DELETE"])
+def delete_job_route(job_id):
+    """
+    Delete a job. Cancels any live SLURM jobs first.
+    ?files=true also deletes the job's workspace folder (irreversible).
+    """
+    import re as _re, subprocess as _sp, threading as _th, shutil as _sh
+    if not _re.fullmatch(r"[0-9a-fA-F-]{36}", job_id):
+        return jsonify({"error": "Invalid job id"}), 400
+    job = db.get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    delete_files = request.args.get("files", "false").lower() == "true"
+
+    with _poll_lock:
+        sids = {str(st["scheduler_id"]) for st in db.get_stages(job_id)
+                if st.get("scheduler_id") and str(st["scheduler_id"]).isdigit()}
+        # also catch watchdogs and resubmitted jobs, which are named sym_<id8>_*
+        try:
+            q = _sp.run(["squeue", "--me", "-h", "-o", "%i|%j"],
+                        capture_output=True, text=True, timeout=15)
+            for line in q.stdout.splitlines():
+                sid, _, name = line.partition("|")
+                if name.startswith(f"sym_{job_id[:8]}_"):
+                    sids.add(sid.strip())
+        except Exception as e:
+            print(f"[delete] squeue failed: {e}", flush=True)
+        for sid in sids:
+            try:
+                _sp.run(["scancel", sid], capture_output=True, timeout=10)
+            except Exception:
+                pass
+        db.delete_job(job_id)
+    print(f"[delete] job {job_id[:8]} deleted; cancelled {len(sids)} SLURM job(s)", flush=True)
+
+    files_scheduled = False
+    if delete_files:
+        ws = Path(CFG.get("paths", {}).get("workspace", "/tmp/symplify")).resolve()
+        target = (ws / job_id).resolve()
+        if target.parent == ws and target.is_dir():
+            def _rm():
+                _sh.rmtree(target, ignore_errors=True)
+                print(f"[delete] removed files for {job_id[:8]}", flush=True)
+            _th.Thread(target=_rm, daemon=True).start()
+            files_scheduled = True
+    return jsonify({"deleted": True, "cancelled_slurm_jobs": len(sids),
+                    "files_deleted": files_scheduled})
+
+
 @app.route("/api/jobs/<job_id>/cancel", methods=["POST"])
 def cancel_job(job_id):
     import subprocess as _sp
@@ -392,7 +468,8 @@ def cancel_job(job_id):
                 pass
 
     # Belt-and-suspenders: cancel by job name for each stage
-    for suffix in ["pilot_gen", "pilot_rf3", "gen", "rf3", "post", "bc"]:
+    for suffix in ["pilot_gen", "pilot_rf3", "pilot_gen_b", "pilot_rf3_b", "pilot_select",
+                   "gen", "rf3", "post", "bc"]:
         try:
             _sp.run(["scancel", f"--name=sym_{job_short}_{suffix}"],
                     capture_output=True, timeout=10)
@@ -427,6 +504,61 @@ def confirm_job(job_id):
     t.start()
 
     return jsonify({"status": "full_run_submitted", "n_designs": n_designs})
+
+@app.route("/api/jobs/<job_id>/append-linker", methods=["POST"])
+def append_linker_route(job_id):
+    """
+    Append a (GGGGS)n linker to every ranked design of a finished job.
+    Body: {"repeats": 3}. Re-applying overwrites the previous linker files.
+    """
+    job = db.get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+
+    body = request.get_json() or {}
+    try:
+        repeats = int(body.get("repeats", 3))
+    except (TypeError, ValueError):
+        return jsonify({"error": "repeats must be an integer"}), 400
+    if not 1 <= repeats <= 10:
+        return jsonify({"error": "repeats must be between 1 and 10"}), 400
+
+    results = db.get_results(job_id, 100000)
+    if not results:
+        return jsonify({"error": "This job has no ranked designs yet"}), 400
+
+    try:
+        sys.path.insert(0, str(SYMPLIFY_DIR / "pipeline" / "core"))
+        from append_linker import append_gs_linker
+    except ImportError as e:
+        return jsonify({"error": f"Linker module unavailable in the server environment: {e}"}), 500
+
+    # RFD3 jobs (small molecule) have the binder on chain A; BindCraft on chain B
+    binder_chain = "A" if job.get("target_type") == "small_molecule" else "B"
+    workspace = Path(CFG.get("paths", {}).get("workspace", "/tmp/symplify"))
+    out_dir   = workspace / job_id / "designs_with_linker_final"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    applied, failed, first_error = 0, 0, None
+    for r in results:
+        pdb = r.get("pdb_path")
+        if not pdb or not Path(pdb).exists():
+            failed += 1
+            first_error = first_error or f"missing PDB for {r.get('design_name')}"
+            continue
+        out = out_dir / f"{Path(pdb).stem}_linker.pdb"
+        try:
+            append_gs_linker(input_pdb=pdb, output_pdb=str(out),
+                             binder_chain_id=binder_chain, terminus="C",
+                             repeats=repeats)
+            db.update_result_linker_path(r["id"], str(out))
+            applied += 1
+        except Exception as e:
+            failed += 1
+            first_error = first_error or f"{r.get('design_name')}: {e}"
+
+    return jsonify({"repeats": repeats, "applied": applied,
+                    "failed": failed, "first_error": first_error})
 
 @app.route("/api/jobs/<job_id>/extend-resubmits", methods=["POST"])
 def extend_resubmits(job_id):
@@ -467,6 +599,43 @@ def extend_resubmits(job_id):
     _poll_job_stages(job_id)   # outside the lock block: resubmit now, not at the next cycle
     return jsonify({"max_resubmits": new_max,
                     "resumed_stages": [s["stage_name"] for s in revive]})
+
+@app.route("/api/jobs/<job_id>/continue-post", methods=["POST"])
+def continue_post(job_id):
+    """
+    Re-run RFD3 post-processing on the top N scored designs by ipTM,
+    ignoring the metric filters. Body: {"top_n": 50}
+    """
+    job = db.get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    if job.get("target_type") != "small_molecule":
+        return jsonify({"error": "Only supported for RFD3 (small molecule) jobs"}), 400
+
+    body = request.get_json() or {}
+    try:
+        top_n = int(body.get("top_n", 50))
+    except (TypeError, ValueError):
+        return jsonify({"error": "top_n must be an integer"}), 400
+    if not 1 <= top_n <= 1000:
+        return jsonify({"error": "top_n must be between 1 and 1000"}), 400
+
+    run_dir = Path(CFG.get("paths", {}).get("workspace", "/tmp/symplify")) / job_id / "full_run"
+    with _poll_lock:
+        post = next((s for s in db.get_stages(job_id)
+                     if s["stage_name"] == "post_processing"), None)
+        if not post or post["status"] != "failed":
+            return jsonify({"error": "Post-processing is not in a failed state"}), 400
+        if not (run_dir / "rf3_outputs" / "all_results.json").exists():
+            return jsonify({"error": "No scored results found for this job"}), 400
+        try:
+            new_jid = router.submit_post_forced(job_id, top_n)
+        except Exception as e:
+            return jsonify({"error": f"Could not submit: {e}"}), 500
+        marker = run_dir / "no_survivors.json"
+        if marker.exists():
+            marker.unlink()
+    return jsonify({"scheduler_id": str(new_jid), "top_n": top_n})
 
 # ---------------------------------------------------------------------------
 # API: Pre-flight scoring

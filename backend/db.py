@@ -382,3 +382,20 @@ def release_watchdog(job_id: str, stage_name: str, watched_id):
             "DELETE FROM watchdogs WHERE job_id=? AND stage_name=? AND watched_id=?",
             (job_id, stage_name, str(watched_id))
         )
+
+def update_result_linker_path(result_id: int, linker_pdb_path):
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE results SET linker_pdb_path=? WHERE id=?",
+            (linker_pdb_path, result_id)
+        )
+
+def delete_job(job_id: str):
+    """Remove a job and everything that references it. Does not touch files."""
+    with get_db() as conn:
+        for tbl in ("results", "stages", "resubmits", "watchdogs"):
+            try:
+                conn.execute(f"DELETE FROM {tbl} WHERE job_id=?", (job_id,))
+            except sqlite3.OperationalError:
+                pass   # table is created lazily and may not exist yet
+        conn.execute("DELETE FROM jobs WHERE id=?", (job_id,))
