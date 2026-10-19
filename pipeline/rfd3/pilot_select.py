@@ -28,22 +28,32 @@ def load_arm(arm_dir):
 
 
 def choose(a, b, margin):
-    """a = ALL arm, b = atoms arm. Returns (winner, reason)."""
+    """a = ALL arm, b = atoms arm. Ties go to ALL."""
+    import statistics as st
     if a is None and b is None:
         return None, "neither arm produced results"
     if b is None:
         return "all", "the atoms arm produced no results"
     if a is None:
         return "atoms", "the ALL arm produced no results"
-    if a["n_passing"] != b["n_passing"] and max(a["n_passing"], b["n_passing"]) > 0:
+    if abs(a["n_passing"] - b["n_passing"]) >= 3:
         w = "all" if a["n_passing"] > b["n_passing"] else "atoms"
         return w, f"more designs pass the thresholds ({a['n_passing']} ALL vs {b['n_passing']} atoms)"
-    gap = b["top10_iptm"] - a["top10_iptm"]
-    if gap > margin:
-        return "atoms", f"90th-percentile ipTM higher by {gap:.3f} (margin {margin})"
-    if gap < -margin:
-        return "all", f"90th-percentile ipTM higher by {-gap:.3f} (margin {margin})"
-    return "all", f"90th-percentile ipTM gap {gap:+.3f} is within the margin {margin}; defaulting to ALL"
+    va, vb = a["iptm_values"], b["iptm_values"]
+    gap = st.mean(vb) - st.mean(va)
+    if len(va) > 1 and len(vb) > 1:
+        se = (st.variance(va) / len(va) + st.variance(vb) / len(vb)) ** 0.5
+    else:
+        se = float("inf")
+    need = max(margin, 2 * se)
+    desc = (f"mean ipTM {st.mean(va):.3f} ALL vs {st.mean(vb):.3f} atoms, "
+            f"gap {gap:+.3f}, needs {need:.3f}")
+    if gap > need:
+        return "atoms", "atoms arm clearly higher: " + desc
+    if gap < -need:
+        return "all", "ALL arm clearly higher: " + desc
+    return "all", "no clear difference, defaulting to ALL: " + desc
+
 
 
 def brief(p):
