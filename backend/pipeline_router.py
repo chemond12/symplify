@@ -351,8 +351,10 @@ class PipelineRouter:
         With no usable atoms this is the single ALL pilot.
         """
         job_dir = Path(job_dir)
+        converted = _ensure_ligand_pdb(target_file)
+        _register_ligand_sdf(job_id, converted, config)
         ligand_path = job_dir / "target_ligand.pdb"
-        shutil.copy2(_ensure_ligand_pdb(target_file), ligand_path)
+        shutil.copy2(converted, ligand_path)
         ligand_file = str(ligand_path)
 
         hotspots = config.get("hotspots", [])
@@ -424,7 +426,7 @@ class PipelineRouter:
                 f"--input_pdb {ligand_file} "
                 f"--output_dir {arm_dir} "
                 f"--n_designs 100 "
-                f"--mpnn_per_bb {mpnn_per_bb} "
+                f"--mpnn_per_bb 1 "
                 f"--skip_rf3 --stop_after mpnn"
             )
             gen_ids[arm] = self.scheduler.submit(JobSpec(
