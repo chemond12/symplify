@@ -255,10 +255,28 @@ def _ensure_ligand_pdb(path: str) -> str:
 
         out_path = str(_Path(path).with_suffix("")) + "_3d.pdb"
         Chem.MolToPDBFile(mol, out_path)
+        try:
+            mol.SetProp("_Name", "LIG")
+            _w = Chem.SDWriter(str(_Path(out_path).with_suffix(".sdf")))
+            _w.write(mol)
+            _w.close()
+        except Exception as _e:
+            print(f"[pipeline_router] WARNING: could not write ligand SDF: {_e}", flush=True)
         _assign_chain_id(out_path, chain_id="Z")
         return out_path
     except Exception:
         return path
+
+def _register_ligand_sdf(job_id, ligand_pdb, config):
+    """Store the Rosetta ligand definition (written next to the converted ligand)."""
+    p = Path(ligand_pdb)
+    sdf = p.with_name(p.stem.removesuffix("_ligand") + ".sdf")
+    if sdf.exists():
+        db.update_job_config_key(job_id, "ligand_sdf", str(sdf))
+        config["ligand_sdf"] = str(sdf)
+    else:
+        print(f"[pipeline_router] WARNING: no ligand SDF at {sdf}; Rosetta will not see the ligand", flush=True)
+
 
 class PipelineRouter:
     def __init__(self, cfg):
@@ -288,6 +306,7 @@ class PipelineRouter:
             f"--unsat_hbonds_threshold {thr.get('delta_unsat_hbonds', 999.0)} "
             f"--hydrophob_threshold {thr.get('surface_hydrophobicity', 999.0)} "
             + ("--skip_rosetta " if config.get("skip_rosetta") else "")
+            + (f"--ligand_sdf {config['ligand_sdf']} " if config.get("ligand_sdf") else "")
         )
     
     def submit(self, job_id, target_type, target_file, config):
@@ -473,6 +492,7 @@ class PipelineRouter:
 
     def _submit_rfd3_pilot_single(self, job_id, target_file, config, job_dir, log_dir):
         target_file  = _ensure_ligand_pdb(target_file)
+        _register_ligand_sdf(job_id, target_file, config)
         defaults     = self.defaults
         mpnn_per_bb  = config.get("mpnn_per_bb",    defaults.get("mpnn_per_backbone", 8))
         target_pass      = config.get("target_passing",    96)
