@@ -53,6 +53,14 @@ def cif_to_pdb(cif_path: str, pdb_path: str) -> None:
         cif_file = pdbx.CIFFile.read(actual_cif)
         atom_array = pdbx.get_structure(cif_file, model=1)
 
+        # Drop atoms with undefined coordinates (biotite will not write NaN to PDB)
+        import numpy as np
+        valid = ~np.isnan(atom_array.coord).any(axis=1)
+        if not valid.all():
+            print(f"  [cif_to_pdb] dropped {int((~valid).sum())} atom(s) with NaN "
+                  f"coordinates from {Path(cif_path).name}", flush=True)
+            atom_array = atom_array[valid]
+
         # Write PDB
         pdb_file = pdb_io.PDBFile()
         pdb_io.set_structure(pdb_file, atom_array)

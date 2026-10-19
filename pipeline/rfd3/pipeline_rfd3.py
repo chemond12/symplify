@@ -60,7 +60,8 @@ from rosetta_analysis import run_rosetta_batch
 # ---------------------------------------------------------------------------
 
 def run_rfd3(config_path: str, input_pdb: str,
-              output_dir: Path, n_designs: int) -> list:
+              output_dir: Path, n_designs: int,
+              extra_overrides: list = None) -> list:
     """Run RFDiffusion3 backbone generation via CLI. Returns list of output JSON paths."""
     import subprocess
 
@@ -93,6 +94,7 @@ def run_rfd3(config_path: str, input_pdb: str,
         f"diffusion_batch_size={batch_size}",
         f"n_batches={n_batches}",
     ]
+    cmd += list(extra_overrides or [])
 
     print(f"  Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, check=True)
@@ -438,7 +440,7 @@ def convert_survivors_to_pdb(survivors: list, output_dir: Path) -> dict:
     name_to_pdb = {}
     for r in survivors:
         cif_path = Path(r["cif_path"])
-        pdb_path = pdb_dir / (cif_path.stem.replace(".cif", "") + ".pdb")
+        pdb_path = pdb_dir / (r["name"] + ".pdb")   # unique per design; CIF stems collide across backbones
         try:
             from cif_to_pdb import cif_to_pdb
             cif_to_pdb(str(cif_path), str(pdb_path))
@@ -453,6 +455,48 @@ def convert_survivors_to_pdb(survivors: list, output_dir: Path) -> dict:
 # ---------------------------------------------------------------------------
 # Stage 6: Terminus accessibility (two-stage)
 # ---------------------------------------------------------------------------
+
+import functools
+
+
+def _fast_screen_worker(args, neighbor_radius, neighbor_max, distance_threshold):
+    """Module-level so multiprocessing can pickle it."""
+    name, pdb_path = args
+    try:
+        passes = fast_terminus_screen(
+            pdb_path           = pdb_path,
+            binder_chain_id    = "A",
+            neighbor_radius    = neighbor_radius,
+            neighbor_max       = neighbor_max,
+            distance_threshold = distance_threshold,
+        )
+        return name, passes
+    except Exception:
+        return name, True  # conservative
+
+
+def _full_analysis_worker(args, sasa_threshold, distance_threshold):
+    """Module-level so multiprocessing can pickle it."""
+    name, pdb_path = args
+    try:
+        report = analyze_termini(
+            pdb_path           = pdb_path,
+            binder_chain_id    = "A",
+            sasa_threshold     = sasa_threshold,
+            distance_threshold = distance_threshold,
+        )
+        return name, {
+            "c_terminus_sasa":     report.c_terminus.sasa,
+            "c_terminus_distance": report.c_terminus.distance,
+            "c_terminus_score":    report.c_terminus.score,
+        }
+    except Exception:
+        return name, {
+            "c_terminus_sasa":     None,
+            "c_terminus_distance": None,
+            "c_terminus_score":    None,
+        }
+
 
 def run_terminus_scoring(survivors: list, name_to_pdb: dict,
                           output_dir: Path,
@@ -474,19 +518,9 @@ def run_terminus_scoring(survivors: list, name_to_pdb: dict,
     # Stage 6a: geometric pre-filter
     print(f"  [6a] Fast geometric pre-filter on {len(survivors)} designs...")
 
-    def _fast_screen(args):
-        name, pdb_path = args
-        try:
-            passes = fast_terminus_screen(
-                pdb_path           = pdb_path,
-                binder_chain_id    = "A",
-                neighbor_radius    = neighbor_radius,
-                neighbor_max       = neighbor_max,
-                distance_threshold = distance_threshold,
-            )
-            return name, passes
-        except Exception:
-            return name, True  # conservative
+    _fast_screen = functools.partial(
+        _fast_screen_worker, neighbor_radius=neighbor_radius,
+        neighbor_max=neighbor_max, distance_threshold=distance_threshold)
 
     screen_args = [(r["name"], name_to_pdb[r["name"]])
                    for r in survivors if r["name"] in name_to_pdb]
@@ -501,26 +535,9 @@ def run_terminus_scoring(survivors: list, name_to_pdb: dict,
     stage6b = [r for r in survivors if r["name"] in geo_survivors]
     print(f"  [6b] Full SASA analysis on {len(stage6b)} designs...")
 
-    def _full_analysis(args):
-        name, pdb_path = args
-        try:
-            report = analyze_termini(
-                pdb_path           = pdb_path,
-                binder_chain_id    = "A",
-                sasa_threshold     = sasa_threshold,
-                distance_threshold = distance_threshold,
-            )
-            return name, {
-                "c_terminus_sasa":     report.c_terminus.sasa,
-                "c_terminus_distance": report.c_terminus.distance,
-                "c_terminus_score":    report.c_terminus.score,
-            }
-        except Exception as e:
-            return name, {
-                "c_terminus_sasa":     None,
-                "c_terminus_distance": None,
-                "c_terminus_score":    None,
-            }
+    _full_analysis = functools.partial(
+        _full_analysis_worker, sasa_threshold=sasa_threshold,
+        distance_threshold=distance_threshold)
 
     analysis_args = [(r["name"], name_to_pdb[r["name"]]) for r in stage6b]
     with multiprocessing.Pool(processes=workers) as pool:
@@ -625,6 +642,42 @@ def apply_rosetta_filters(survivors: list, failing: list,
 
     print(f"  {len(passing)}/{len(survivors)} designs pass Rosetta filters.")
     return passing, failing
+
+def _write_no_survivors(output_dir, stage, n_scored, failing, args):
+    """Record why nothing passed, for the UI's 'No scored designs meet criteria' panel."""
+    reasons = {}
+    for r in failing:
+        key = (r.get("rf3_fail_reason") or "other").split("=")[0].strip()
+        reasons[key] = reasons.get(key, 0) + 1
+    top = sorted(failing, key=lambda r: float(r.get("iptm") or 0), reverse=True)[:5]
+    info = {
+        "stage":    stage,   # "rf3" or "rosetta"
+        "n_scored": n_scored,
+        "reasons":  reasons,  # first criterion each design failed
+        "thresholds": {
+            "iptm": args.iptm_threshold, "ptm": args.ptm_threshold,
+            "plddt": args.plddt_threshold, "min_ipae": args.min_ipae_threshold,
+            "rmsd": args.rmsd_threshold, "dg": args.dg_threshold,
+            "unsat_hbonds": args.unsat_hbonds_threshold,
+            "hydrophobicity": args.hydrophob_threshold,
+        },
+        "top": [{"name": r["name"], "iptm": r.get("iptm"),
+                 "ptm": r.get("ptm"), "min_ipae": r.get("min_ipae")} for r in top],
+    }
+    with open(Path(output_dir) / "no_survivors.json", "w") as f:
+        json.dump(info, f, indent=2)
+
+
+def _force_top(failing, n):
+    """Promote the top n designs by ipTM out of the failing list."""
+    ranked = sorted(failing, key=lambda r: float(r.get("iptm") or 0), reverse=True)
+    chosen = ranked[:n]
+    chosen_ids = {id(r) for r in chosen}
+    rest = [r for r in failing if id(r) not in chosen_ids]
+    for r in chosen:
+        r["rf3_fail_reason"] = "forced: " + (r.get("rf3_fail_reason") or "")
+        r.setdefault("rmsd", None)
+    return chosen, rest
 
 def rank_and_write(survivors: list, failing: list,
                     output_dir: Path) -> list:
@@ -803,6 +856,14 @@ def main():
     parser.add_argument("--dg_threshold",           type=float, default=1e9)
     parser.add_argument("--unsat_hbonds_threshold", type=float, default=999.0)
     parser.add_argument("--hydrophob_threshold",    type=float, default=999.0)
+    parser.add_argument("--skip_rosetta", action="store_true",
+                        help="Skip Rosetta analysis; its metrics stay empty")
+    parser.add_argument("--force_post", action="store_true",
+                        help="Run post-processing even if no design meets the criteria")
+    parser.add_argument("--force_top", type=int, default=50,
+                        help="With --force_post: take the top N designs by ipTM")
+    parser.add_argument("--rfd3_override", action="append", default=[],
+                        help="Extra Hydra override for `rfd3 design` (repeatable)")
     args = parser.parse_args()
 
     t_start    = time.time()
@@ -812,7 +873,8 @@ def main():
     # Stage 1: RFD3
     if not args.skip_rfd3:
         rfd3_jsons = run_rfd3(
-            args.config, args.input_pdb, output_dir, args.n_designs
+            args.config, args.input_pdb, output_dir, args.n_designs,
+            extra_overrides=args.rfd3_override,
         )
     else:
         print("\n[Stage 1] Skipping RFD3 (using existing outputs)")
@@ -854,8 +916,25 @@ def main():
         rmsd_thresh=args.rmsd_threshold,
     )
 
+    if not survivors:
+        if args.force_post:
+            survivors, failing = _force_top(failing, args.force_top)
+            print(f"\n[pipeline_rfd3] --force_post: no design met the criteria; "
+                  f"continuing with the top {len(survivors)} by ipTM", flush=True)
+        else:
+            _write_no_survivors(output_dir, "rf3", len(rf3_results), failing, args)
+            print("\n[pipeline_rfd3] No scored designs meet the filter criteria. "
+                  "Wrote no_survivors.json and stopping; re-run with --force_post "
+                  "to continue anyway.", flush=True)
+            raise SystemExit(3)
+
     # Stage 5: CIF → PDB
     name_to_pdb = convert_survivors_to_pdb(survivors, output_dir)
+
+    if survivors and not name_to_pdb:
+        print("\n[pipeline_rfd3] ERROR: CIF→PDB conversion produced no files; stopping.",
+              flush=True)
+        raise SystemExit(4)
 
     # Stage 6: Terminus scoring
     survivors = run_terminus_scoring(
@@ -868,14 +947,28 @@ def main():
     )
 
     # Stage 7: Rosetta
-    survivors = run_rosetta_stage(survivors, name_to_pdb, output_dir)
+    if args.skip_rosetta:
+        print("\n[Stage 7] Skipping Rosetta (--skip_rosetta); its metrics stay empty", flush=True)
+        for r in survivors:
+            for k in ("dG", "dSASA", "dG_dSASA_ratio", "surface_hydrophobicity",
+                      "shape_complementarity", "packstat", "interface_hbonds",
+                      "delta_unsat_hbonds", "binder_score", "interface_fraction"):
+                r.setdefault(k, None)
+    else:
+        survivors = run_rosetta_stage(survivors, name_to_pdb, output_dir)
 
-    survivors, failing = apply_rosetta_filters(
-        survivors, failing,
-        dg_thresh=args.dg_threshold,
-        unsat_thresh=args.unsat_hbonds_threshold,
-        hydrophob_thresh=args.hydrophob_threshold,
-    )
+    if not args.force_post:
+        survivors, failing = apply_rosetta_filters(
+            survivors, failing,
+            dg_thresh=args.dg_threshold,
+            unsat_thresh=args.unsat_hbonds_threshold,
+            hydrophob_thresh=args.hydrophob_threshold,
+        )
+        if not survivors:
+            _write_no_survivors(output_dir, "rosetta", len(rf3_results), failing, args)
+            print("\n[pipeline_rfd3] No design passed the Rosetta filters. "
+                  "Wrote no_survivors.json and stopping.", flush=True)
+            raise SystemExit(3)
 
     # Stage 8: Rank + CSV
     ranked = rank_and_write(survivors, failing, output_dir)
