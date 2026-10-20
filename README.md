@@ -89,7 +89,7 @@ pip install "scikit-learn<1.6" "numpy==1.23.5"
 PeSTo's trained model weights are part of its repository (`model/save/`), so no
 separate download is needed.
 
-### 4. Install RFdiffusion3 (small-molecule targets only)
+### 4. Install RFdiffusion3 (small-molecule targets)
 
 Protein targets do not need this environment. It runs RFdiffusion3 generation,
 LigandMPNN sequence design and RF3 scoring.
