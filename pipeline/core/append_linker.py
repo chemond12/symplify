@@ -114,7 +114,181 @@ def _build_residue_backbone(n_coord: np.ndarray,
 # Main linker append function
 # ---------------------------------------------------------------------------
 
+from Bio.PDB.Residue import Residue as _BioResidue
+from Bio.PDB.Atom import Atom as _BioAtom
+
+
+def _dihedral_deg(p0, p1, p2, p3):
+    # Standard dihedral angle in degrees.
+    b0 = p0 - p1
+    b1 = p2 - p1
+    b2 = p3 - p2
+    b1 = b1 / np.linalg.norm(b1)
+    v = b0 - np.dot(b0, b1) * b1
+    w = b2 - np.dot(b2, b1) * b1
+    return math.degrees(math.atan2(np.dot(np.cross(b1, v), w), np.dot(v, w)))
+
+
+def _nerf(a, b, c, length, angle_deg, dihedral_deg):
+    # Place atom d: |c-d| = length, angle(b,c,d) = angle_deg, dihedral(a,b,c,d) = dihedral_deg.
+    a, b, c = (np.asarray(x, dtype=float) for x in (a, b, c))
+    bc = c - b
+    bc = bc / np.linalg.norm(bc)
+    n = np.cross(b - a, bc)
+    n = n / np.linalg.norm(n)
+    m = np.cross(n, bc)
+    th, ph = math.radians(angle_deg), math.radians(dihedral_deg)
+    d = np.array([-length * math.cos(th),
+                  length * math.sin(th) * math.cos(ph),
+                  length * math.sin(th) * math.sin(ph)])
+    return c + d[0] * bc + d[1] * m + d[2] * n
+
+
 def append_gs_linker(
+    input_pdb:      str,
+    output_pdb:     str,
+    binder_chain_id: str = "A",
+    terminus:       str  = "C",
+    repeats:        int  = 3,
+) -> None:
+    # C-terminal (GGGGS)n linker with ideal peptide geometry. Residues are grown one
+    # at a time from sampled torsions; candidates that come within 2.6 A of the
+    # structure or of the earlier linker are rejected, and the chain restarts if it
+    # gets stuck. Deterministic (fixed seeds). Not energy-minimized.
+    import random
+    if terminus.upper() != "C":
+        raise NotImplementedError("only C-terminal linkers are supported")
+
+    structure = PDBParser(QUIET=True).get_structure("design", input_pdb)
+    model = structure[0]
+    chain = model[binder_chain_id]
+    std = [r for r in chain if r.id[0] == " "]
+    if not std:
+        raise ValueError(f"No standard residues found in chain {binder_chain_id}")
+    anchor = std[-1]
+    for need in ("N", "CA", "C"):
+        if need not in anchor:
+            raise ValueError(f"Anchor residue has no {need} atom")
+    if "OXT" in anchor:
+        anchor.detach_child("OXT")
+
+    n0 = anchor["N"].coord.astype(float)
+    ca0 = anchor["CA"].coord.astype(float)
+    c0 = anchor["C"].coord.astype(float)
+    psi_start = (_dihedral_deg(n0, ca0, c0, anchor["O"].coord.astype(float)) - 180.0
+                 if "O" in anchor else 130.0)
+
+    # Exclude only the anchor's backbone atoms (bonded to the first linker residue);
+    # every side chain, including the anchor's and the previous residue's, stays visible.
+    anchor_bb = {"N", "CA", "C", "O", "OXT"}
+    others = np.array([a.coord.astype(float) for r in model.get_residues() for a in r
+                       if not (r is anchor and a.get_id() in anchor_bb)
+                       and not a.get_id().lstrip("0123456789").startswith("H")])
+    centroid = others.mean(axis=0) if len(others) else ca0
+    tree = None
+    try:
+        from scipy.spatial import cKDTree
+        tree = cKDTree(others) if len(others) else None
+    except Exception:
+        tree = None
+
+    def nearest(pts):
+        if not len(others):
+            return np.full(len(pts), 99.0)
+        if tree is not None:
+            return tree.query(pts)[0]
+        return np.linalg.norm(pts[:, None, :] - others[None, :, :], axis=2).min(axis=1)
+
+    def make_residue(state, resname, phi, psi):
+        n_prev, ca_prev, c_prev, psi_prev = state
+        n = _nerf(n_prev, ca_prev, c_prev, 1.329, 116.2, psi_prev)
+        ca = _nerf(ca_prev, c_prev, n, 1.458, 121.7, 180.0)
+        c = _nerf(c_prev, n, ca, 1.525, 111.2, phi)
+        o = _nerf(n, ca, c, 1.231, 120.8, psi + 180.0)
+        atoms = [("N", n, "N"), ("CA", ca, "C"), ("C", c, "C"), ("O", o, "O")]
+        if resname == "SER":
+            b, cc = ca - n, c - ca
+            a = np.cross(b, cc)
+            cb = -0.58273431 * a + 0.56802827 * b - 0.54067466 * cc + ca
+            og = _nerf(n, ca, cb, 1.430, 110.8, -65.0)
+            atoms += [("CB", cb, "C"), ("OG", og, "O")]
+        return atoms, (n, ca, c, psi)
+
+    def sample(rng, resname):
+        r = rng.random()
+        if r < 0.45:
+            return rng.uniform(-160, -60), rng.choice([rng.uniform(110, 180), rng.uniform(-180, -165)])
+        if r < 0.70:
+            return rng.uniform(-80, -50), rng.uniform(-60, -25)
+        if r < 0.85 or resname != "GLY":
+            return rng.uniform(-120, -60), rng.uniform(-50, 50)
+        return rng.uniform(50, 100), rng.uniform(-20, 60)
+
+    CLASH = 2.6
+
+    def penalty(atoms, prior):
+        pts = np.array([xyz for _, xyz, _ in atoms])
+        d = nearest(pts)
+        pen = float(np.sum(np.clip(CLASH - d, 0, None) ** 2))
+        dmin = float(d.min())
+        if len(prior):
+            dd = np.linalg.norm(pts[:, None, :] - np.array(prior)[None, :, :], axis=2)
+            pen += float(np.sum(np.clip(CLASH - dd, 0, None) ** 2))
+            dmin = min(dmin, float(dd.min()))
+        return pen, dmin
+
+    names = (["GLY"] * 4 + ["SER"]) * repeats
+    best = None
+    for restart in range(25):
+        rng = random.Random(7919 + restart)
+        psi0 = psi_start if restart == 0 else rng.uniform(-180.0, 180.0)
+        state = (n0, ca0, c0, psi0)
+        built, per_res, total, dmin_all = [], [], 0.0, 99.0
+        for resname in names:
+            prior = [x for res in per_res[:-1] for x in res]
+            zero, fallback = [], None
+            for _ in range(200):
+                phi, psi = sample(rng, resname)
+                atoms, new_state = make_residue(state, resname, phi, psi)
+                pen, dmin = penalty(atoms, prior)
+                if pen == 0.0:
+                    zero.append((atoms, new_state, dmin))
+                    if len(zero) >= 12:
+                        break
+                elif fallback is None or pen < fallback[0]:
+                    fallback = (pen, atoms, new_state, dmin)
+            if zero:
+                atoms, state, dmin = max(zero, key=lambda t: float(np.linalg.norm(t[0][1][1] - centroid)))
+                pen = 0.0
+            else:
+                pen, atoms, state, dmin = fallback
+            total += pen
+            dmin_all = min(dmin_all, dmin)
+            built.append((resname, atoms))
+            per_res.append([xyz for _, xyz, _ in atoms])
+        if best is None or total < best[0]:
+            best = (total, dmin_all, restart, built, psi0)
+        if total == 0.0:
+            break
+
+    if "O" in anchor and best[4] != psi_start:
+        anchor["O"].coord = _nerf(n0, ca0, c0, 1.231, 120.8, best[4] + 180.0).astype("float32")
+    start = anchor.id[1] + 1
+    for i, (resname, atoms) in enumerate(best[3]):
+        res = _BioResidue((" ", start + i, " "), resname, " ")
+        for name, xyz, el in atoms:
+            res.add(_BioAtom(name, np.array(xyz, dtype="float32"), 20.0, 1.0, " ",
+                             f" {name:<3}", 0, el))
+        chain.add(res)
+
+    io = PDBIO()
+    io.set_structure(structure)
+    io.save(output_pdb)
+    print(f"  [linker] {Path(input_pdb).name}: restart {best[2]}, closest contact "
+          f"{best[1]:.2f} A, penalty {best[0]:.2f}, anchor psi {best[4]:.0f}", flush=True)
+
+
+def _append_gs_linker_legacy(
     input_pdb:      str,
     output_pdb:     str,
     binder_chain_id: str = "A",
