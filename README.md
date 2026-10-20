@@ -1,4 +1,4 @@
-# Symplify
+# SymPlify
 
 **Binder design platform for phage display and beyond.**  
 Built by Princeton iGEM 2026.
@@ -310,4 +310,5 @@ If you use Symplify, please cite:
 - Watson et al. (2023) — RFDiffusion
 - Pacesa et al. (2024) — BindCraft  
 - Krishna et al. (2025) — RFDiffusion3
+- Krapp et al. (2023) — PeSTo
 - Princeton iGEM 2026 — Symplify
