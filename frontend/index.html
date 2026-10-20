@@ -1359,6 +1359,7 @@ const API = {
     });
     return r.json();
   },
+  downloadAllUrl(id, linker) { return `/api/jobs/${id}/download-all?linker=${linker ? 'true' : 'false'}`; },
   async appendLinker(id, repeats) {
     const r = await fetch(`/api/jobs/${id}/append-linker`, {
       method: 'POST',
@@ -3057,7 +3058,21 @@ function ResultsPage({ jobId, onNewJob }) {
           <div className="hero-eyebrow" style={{marginBottom:4}}>Results</div>
           <h1 className="page-title" style={{fontSize:28}}>{results.length} ranked designs</h1>
         </div>
-        <button className="btn-secondary" onClick={onNewJob}>+ New job</button>
+        <div style={{display:'flex', gap:8, alignItems:'center', flexWrap:'wrap'}}>
+          <a href={API.downloadAllUrl(jobId, false)} download>
+            <button className="btn-secondary" style={{padding:'6px 14px', fontSize:12}}>
+              ↓ Download all {results.length} designs
+            </button>
+          </a>
+          {results.some(r => r.linker_pdb_path) && (
+            <a href={API.downloadAllUrl(jobId, true)} download>
+              <button className="btn-secondary" style={{padding:'6px 14px', fontSize:12}}>
+                ↓ All with linker
+              </button>
+            </a>
+          )}
+          <button className="btn-secondary" onClick={onNewJob}>+ New job</button>
+        </div>
       </div>
 
       <div className="field-group" style={{display:'flex', alignItems:'center', gap:10,
@@ -3131,10 +3146,11 @@ function ResultsPage({ jobId, onNewJob }) {
             <div className="viewer-controls">
               <button className={`viewer-btn ${!linker ? 'active' : ''}`}
                       onClick={() => setLinker(false)}>Binder</button>
-              {sel?.linker_pdb_path && (
-                <button className={`viewer-btn ${linker ? 'active' : ''}`}
-                        onClick={() => setLinker(true)}>+ Linker</button>
-              )}
+              <button className={`viewer-btn ${linker ? 'active' : ''}`}
+                      disabled={!sel?.linker_pdb_path}
+                      title={sel?.linker_pdb_path ? '' : 'No linker yet: use "Append linker to all designs" above'}
+                      style={sel?.linker_pdb_path ? undefined : {opacity:0.4, cursor:'not-allowed'}}
+                      onClick={() => setLinker(true)}>+ Linker</button>
             </div>
           </div>
 
@@ -3171,13 +3187,19 @@ function ResultsPage({ jobId, onNewJob }) {
                 ↓ PDB
               </button>
             </a>
-            {sel?.linker_pdb_path && (
-              <a href={API.structureUrl(jobId, sel?.rank, true)}
+            {sel?.linker_pdb_path ? (
+            <a href={API.structureUrl(jobId, sel?.rank, true)}
                  download={`${sel?.design_name}_linker.pdb`}>
                 <button className="btn-primary" style={{fontSize:12, padding:'8px 14px'}}>
                   ↓ PDB + linker
                 </button>
               </a>
+            ) : (
+              <button className="btn-primary" disabled
+                      title='No linker yet: use "Append linker to all designs" above'
+                      style={{fontSize:12, padding:'8px 14px', opacity:0.4, cursor:'not-allowed'}}>
+                ↓ PDB + linker
+              </button>
             )}
           </div>
         </div>

@@ -445,6 +445,45 @@ def delete_job_route(job_id):
                     "files_deleted": files_scheduled})
 
 
+@app.route("/api/jobs/<job_id>/download-all", methods=["GET"])
+def download_all(job_id):
+    """Zip of every ranked design's PDB plus metrics.csv. ?linker=true uses the linker files."""
+    import io, csv, zipfile
+    job = db.get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    use_linker = request.args.get("linker", "false").lower() == "true"
+    results = db.get_results(job_id, 100000)
+    if not results:
+        return jsonify({"error": "This job has no ranked designs"}), 404
+
+    buf, n = io.BytesIO(), 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for r in results:
+            path = r.get("linker_pdb_path") if use_linker else r.get("pdb_path")
+            if path and Path(path).exists():
+                suffix = "_linker" if use_linker else ""
+                z.write(path, f"{int(r.get('rank') or 0):03d}_{r['design_name']}{suffix}.pdb")
+                n += 1
+        keys = []
+        for r in results:
+            for k, v in (r.get("metrics") or {}).items():
+                if k not in keys and not isinstance(v, (dict, list)):
+                    keys.append(k)
+        out = io.StringIO()
+        w = csv.DictWriter(out, fieldnames=["rank", "design_name"] + keys, extrasaction="ignore")
+        w.writeheader()
+        for r in results:
+            w.writerow({"rank": r.get("rank"), "design_name": r["design_name"], **(r.get("metrics") or {})})
+        z.writestr("metrics.csv", out.getvalue())
+    if n == 0:
+        return jsonify({"error": "No structure files found for this job"
+                                 + (" (append a linker first)" if use_linker else "")}), 404
+    buf.seek(0)
+    name = secure_filename(f"{job['name']}_{job_id[:8]}_designs{'_linker' if use_linker else ''}.zip")
+    return send_file(buf, mimetype="application/zip", as_attachment=True, download_name=name)
+
+
 @app.route("/api/jobs/<job_id>/cancel", methods=["POST"])
 def cancel_job(job_id):
     import subprocess as _sp
