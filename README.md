@@ -1,4 +1,4 @@
-# Symplify
+# SymPlify
 
 **Binder design platform for phage display and beyond.**  
 Built by Princeton iGEM 2026.
