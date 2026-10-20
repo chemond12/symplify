@@ -91,10 +91,25 @@ separate download is needed.
 
 ### 4. Install RFdiffusion3 (small-molecule targets only)
 
-<!-- TODO: add the installation steps for the rfd3 environment (RFdiffusion3, RF3,
-     foundry, LigandMPNN, atomworks) and the weights/CCD mirror locations. -->
-Setup instructions for the `rfd3` environment are still being written. Protein
-targets do not need it.
+Protein targets do not need this environment. It runs RFdiffusion3 generation,
+LigandMPNN sequence design and RF3 scoring.
+
+```bash
+conda create -n rfd3 python=3.12 -y
+conda activate rfd3
+pip install "rc-foundry[rfd3]"                 # provides the `rfd3` command
+foundry install rfd3 --checkpoint-dir /path/to/foundry_weights
+foundry install rf3  --checkpoint-dir /path/to/foundry_weights
+```
+
+`foundry install` downloads the model checkpoints into that folder. See the
+[RFdiffusion3 README](https://github.com/RosettaCommons/foundry) for details. RF3
+scoring also needs a local copy of the chemical component dictionary; see the
+[AtomWorks mirrors guide](https://rosettacommons.github.io/atomworks/latest/mirrors.html).
+Symplify does not use hydrogen-bond conditioning, so HBPLUS is not required.
+
+Then set these under `paths` in `config.yaml`: `rfd3_checkpoint`, `rf3_weights`
+(the RF3 checkpoint file), `foundry_weights_dir` (the checkpoint folder) and `ccd_mirror`.
 
 ### 5. Configure
 
@@ -212,24 +227,30 @@ symplify/
 ├── requirements.txt            # web app dependencies
 │
 ├── backend/
-│   ├── app.py                  # Flask API
-│   ├── job_manager.py          # SLURM/PBS/SGE/local abstraction
-│   ├── pipeline_router.py      # routes jobs to RFD3 or BindCraft
-│   ├── difficulty_scorer.py    # bindability difficulty scoring
-│   ├── hotspot_finder.py       # PESTO + RDKit pharmacophore identification
-│   ├── setup_wizard.py         # interactive setup and config validation
-│   └── db.py                   # SQLite job tracking
+│   ├── app.py                 # Flask API, background poller, job completion
+│   ├── job_manager.py         # SLURM/PBS/SGE/local abstraction
+│   ├── pipeline_router.py     # routes jobs to RFD3 or BindCraft; pilot, resubmission, ligand setup
+│   ├── auto_resubmit.py       # resubmits stages that hit the scheduler time limit
+│   ├── timeout_watchdog.py    # small scheduler job that triggers resubmission without the server
+│   ├── difficulty_scorer.py   # bindability difficulty scoring
+│   ├── hotspot_finder.py      # PESTO + RDKit pharmacophore identification
+│   ├── pesto_predict.py       # runs PeSTo and maps its residues to the input file
+│   ├── setup_wizard.py        # interactive setup and config validation
+│   ├── arm_experiment.py      # optional: compares RFD3 conditioning settings on one ligand
+│   └── db.py                  # SQLite job tracking
 │
 ├── pipeline/
 │   ├── core/
-│   │   ├── analyze_termini.py  # C-terminus accessibility scoring
-│   │   ├── append_linker.py    # (GGGGS)n linker append
-│   │   ├── cif_to_pdb.py       # CIF → PDB conversion
-│   │   └── rosetta_analysis.py # PyRosetta interface metrics
+│   │   ├── analyze_termini.py     # C-terminus accessibility scoring
+│   │   ├── append_linker.py       # (GGGGS)n linker builder
+│   │   ├── cif_to_pdb.py          # CIF → PDB conversion
+│   │   └── rosetta_analysis.py    # PyRosetta interface metrics (relaxed copies, ligand loaded from SDF)
 │   ├── bindcraft/
-│   │   └── pipeline_bindcraft.py
+│   │   └── pipeline_bindcraft.py  # BindCraft post-processing: filter, rank, hotspot check
 │   └── rfd3/
-│       └── pipeline_rfd3.py
+│       ├── pipeline_rfd3.py       # RFD3 generation, screened RF3 scoring, post-processing
+│       ├── pilot_rf3.py           # pilot scoring and n_designs recommendation
+│       └── pilot_select.py        # compares the two pilot arms and carries the winner forward
 │
 └── frontend/
     └── index.html              # Single-file React app (no build step)
