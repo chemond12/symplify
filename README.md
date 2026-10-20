@@ -289,4 +289,5 @@ If you use Symplify, please cite:
 - Watson et al. (2023) — RFDiffusion
 - Pacesa et al. (2024) — BindCraft  
 - Krishna et al. (2025) — RFDiffusion3
+- Krapp et al. (2023) — PeSTo
 - Princeton iGEM 2026 — Symplify
