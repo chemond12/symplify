@@ -4,3 +4,5 @@ symplify.db
 uploads/
 frontend/dist/
 __pycache__/
+ligand_params/
+*.sdf
