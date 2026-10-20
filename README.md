@@ -177,7 +177,7 @@ open that port. Then browse to <http://localhost:8080>.
 This repository holds source code only. Model weights and datasets are not stored here:
 
 - PeSTo's model weights are in the PeSTo repository, and BindCraft's AlphaFold parameters are downloaded by BindCraft's installer.
-- Datasets, example outputs and any other large files are archived on [Zenodo](https://teams.igem.org/go/deliverables/software/zenodo), which gives each upload a citable DOI. <!-- TODO: add the Zenodo record link(s) once uploaded. -->
+- Outputs from SymPlify and any other large files on Princeton iGEM 2026 Zenodo linked on our wiki!
 
 ---
 
